@@ -344,3 +344,7 @@ pytest tests/
 - `tests/synteettiset.py`: talogeneraattori (suorakulmio, L, T, parveke, syvennys, vino, kaareva erkkeri, pyöristetty kulma). Se simuloi maastomittauksen koodeineen, piilokulmineen ja 3 mm mittausvirheineen. `test_seinalinja_synteettinen.py` vertaa muodostettua seinälinjaa oikeaan muotoon. 3 mm pistevirheellä koko viivan suurin poikkeama on mediaanina 6–8 mm.
 - `test_kanta.py`: kantafunktiot väliaikaisessa PostGIS-kannassa, joka luodaan ja poistetaan ajon aikana. Testit ohitetaan, jos PostgreSQL:ää tai PostGIS:iä ei ole. Yhteys muodostetaan `PG*`-ympäristömuuttujilla, ja oletuskäyttäjä on kirjautunut käyttäjä. GPKG-tuonnin testi vaatii lisäksi `ogr2ogr`:n.
 - `test_app.py`: sovelluksen savutestit (Streamlit AppTest): kirjautuminen, kiinteistöhaku, omien kiintopisteiden tuonti ja JobXML-osio oikeilla tiedostoilla. Verkko- ja kantakutsut korvataan mockeilla.
+
+## Lisenssi
+
+Lisensoitu [EUPL-1.2](LICENSE)-lisenssillä (European Union Public Licence 1.2). Koodia saa käyttää, muokata ja jakaa, myös kaupallisesti. Jos muokattua versiota jaetaan tai tarjotaan palveluna verkon yli, muutokset on julkaistava EUPL-1.2:lla tai sen kanssa yhteensopivalla lisenssillä.
