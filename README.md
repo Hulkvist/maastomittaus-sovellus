@@ -90,12 +90,13 @@ Taulut (kaikki EPSG:3879):
 
 ### Mittauksen animaatio
 
-Asemapisteet, liitosviivat ja mitatut pisteet voi toistaa QGIS:n aikasäätimellä (Temporal Controller) siinä järjestyksessä kuin ne mitattiin: ensin asema, sitten liitosviivat sitä mukaa kuin liitospisteet mitataan, sitten aseman mittaamat pisteet, sitten seuraava asema. Tahti on tasainen (yksi vaihe sekunnissa animaatioaikaa) eikä oikea mittausaika, joten tauot eivät näy. Järjestys (`jarjestys`) lasketaan tallennuksessa, ja kanta laskee siitä sarakkeen `animaatioaika` (1.1.2000 + jarjestys sekuntia), josta tyylit lukevat ajan.
+Asemapisteet, liitosviivat ja mitatut pisteet voi toistaa QGIS:n aikasäätimellä (Temporal Controller) siinä järjestyksessä kuin ne mitattiin: ensin asema, sitten liitosviivat sitä mukaa kuin liitospisteet mitataan, sitten aseman mittaamat pisteet, sitten seuraava asema. Tahti on tasainen (yksi vaihe sekunnissa animaatioaikaa) eikä oikea mittausaika, joten tauot eivät näy. Järjestys (`jarjestys`) lasketaan tallennuksessa, ja kanta laskee siitä sarakkeen `animaatioaika` (1.1.2000 00:00 UTC + jarjestys sekuntia), josta tyylit lukevat ajan. Sarake on aikavyöhykkeellinen, koska aikasäädin toimii UTC-ajassa.
 
 1. Lisää tasot `asemapisteet`, `asemien_liitokset` ja `kentalla_mitatut_pisteet` kannasta.
 2. Lataa kullekin tyyli erikseen: tason ominaisuudet → *Tyyli → Lataa tyyli → Tietokannasta* (tai `qgis_tyylit/<taulu>.qml`). QGIS ei ota aika-asetuksia mukaan, kun se käyttää kannan oletustyyliä tason lisäyksessä, mutta erikseen ladattuna ne tulevat.
-3. *Näytä → Paneelit → Aikasäädin* → *Animoitu aikanavigointi* (filminauha-kuvake) → *Aseta koko aikaväli* (nuolikuvake) → askel **1 sekunti** → ▶. Nopeus: asetuksista (ratas) kuvataajuus, esim. 5 ruutua sekunnissa.
+3. *Näytä → Paneelit → Aikasäädin* (kellokuvake) → *Animoitu aikanavigointi* (kello ja ▶) → *Aseta koko aikaväli* (pyöreä nuoli Animation range -rivin lopussa) → askel **1 sekunti** → ▶. Nopeus: asetuksista (ratas) kuvataajuus, esim. 5 ruutua sekunnissa.
 4. Useamman tiedoston mittaukset alkavat samaan aikaan; suodata tasot tarvittaessa lähdetiedostolla (`"lahdetiedosto" = 'työ.jxl'`). Animaation saa videoksi tai kuvasarjaksi aikasäätimen *Vie animaatio* -toiminnolla.
+5. Video: helpoin on macOS:n näytön tallennus (Cmd+Shift+5 → *Tallenna valittu osa* → rajaa kartta → ▶ aikasäätimessä). Toinen tapa: aikasäätimen *Vie animaatio* (levykekuvake Step-rivin lopussa) tallentaa jokaisen vaiheen PNG-kuvaksi (esim. `ruutu####.png`), ja kuvat yhdistetään videoksi esim. ffmpegillä: `ffmpeg -framerate 5 -i ruutu%04d.png -c:v libx264 -pix_fmt yuv420p animaatio.mp4`.
 
 Vain muutoksen jälkeen tallennetuilla mittauksilla on järjestys; vanhat rivit näkyvät koko animaation ajan.
 
