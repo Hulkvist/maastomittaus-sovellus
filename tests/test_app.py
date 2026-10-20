@@ -198,6 +198,7 @@ def test_mittausten_tallennus_vie_seinalinjan(monkeypatch):
     assert (tunnus, lahdetiedosto, poikkeamat) == ("09102509510003", "testi2.jxl", [])
     assert tulos["viivat"]
     assert pisteet.call_args[0][0] == "09102509510003"
+    assert pisteet.call_args[0][3]["lahdetiedosto"] == "testi2.jxl"   # raportti mukaan: asema ja järjestys
     tunnus, raportin_tiedot, _, _, pdf, _ = raportti.call_args[0]
     assert (tunnus, raportin_tiedot["lahdetiedosto"]) == ("09102509510003", "testi2.jxl")
     assert pdf.startswith(b"%PDF")

@@ -250,6 +250,19 @@ def test_mittausraportin_tallennus_haku_ja_poistot(db):
     assert asemia >= 1
     pdf = b"%PDF-1.4 testi"
     assert jx.tallenna_raportti_kantaan("091-1-1-1", raportti, pisteet, hylatyt, pdf, db) == asemia
+    # mitatut pisteet raportin kanssa: asema ja sama mittausjärjestys kuin asemilla ja liitosviivoilla
+    jx.tallenna_mittaukset_kantaan("091-1-1-1", jx.pisteet_tallennettavaksi(pisteet), db, raportti)
+    assert kysy(db, "SELECT count(*) = count(mitattu) FROM kentalla_mitatut_pisteet;") == [(True,)]
+    ensimmainen = kysy(db, "SELECT asema, jarjestys, animaatioaika FROM asemapisteet "
+                           "WHERE kiinteistotunnus = '091-1-1-1' ORDER BY jarjestys LIMIT 1;")[0]
+    assert ensimmainen[2].second == ensimmainen[1]   # animaatioaika = jarjestys sekunteina
+    # aseman jälkeen heti sen ensimmäinen havainto (testi2:ssa GNSS-piste ennen asemaa)
+    assert kysy(db, "SELECT min(jarjestys) FROM kentalla_mitatut_pisteet WHERE asema = %s "
+                    "AND kuvaus <> 'Asemapiste';", (ensimmainen[0],)) == [(ensimmainen[1] + 1,)]
+    assert kysy(db, "SELECT bool_and(l.jarjestys > a.jarjestys) FROM asemien_liitokset l "
+                    "JOIN asemapisteet a USING (kiinteistotunnus, lahdetiedosto, asema_nro);") == [(True,)]
+    with hk.kanta(db) as cur:   # pisteet vain tätä tarkistusta varten; poistolaskurit alla ilman niitä
+        cur.execute("TRUNCATE kentalla_mitatut_pisteet;")
     # uudelleentallennus korvaa saman kiinteistön ja tiedoston raportin ja asemat
     assert jx.tallenna_raportti_kantaan("091-1-1-1", raportti, pisteet, hylatyt, pdf, db) == asemia
     jx.tallenna_raportti_kantaan("091-1-1-2", raportti, pisteet, hylatyt, None, db)

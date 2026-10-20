@@ -69,7 +69,7 @@ Taulut (kaikki EPSG:3879):
 | `kiinteistot` | Haettujen kiinteistöjen keskipisteet |
 | `haku_tulokset` | Viimeisimmän haun kiintopisteet säteen sisällä (tyhjennetään joka haulla) |
 | `rajamerkit`, `kiinteistorajat` | Haetun kiinteistön rajamerkit ja rajaviivat |
-| `kentalla_mitatut_pisteet` | JobXML-mittausten pisteet (kertyvät tallennuksista) |
+| `kentalla_mitatut_pisteet` | JobXML-mittausten pisteet (kertyvät tallennuksista); `mitattu` = mittausaika, `asema`/`asema_nro` = asema, jolta piste mitattiin, `jarjestys` = mittausjärjestys (ks. Mittauksen animaatio) |
 | `seinalinjat` | Mittauksista muodostetut seinälinjat; saman kiinteistön ja tiedoston viivat korvataan uudelleentallennuksessa |
 | `mittausraportit` | Mittausraportin yhteenveto (päivä, kalusto, huonoin asema, tarkistettavat kohdat) ja PDF; piste mitattujen pisteiden keskellä |
 | `asemapisteet` | Kojeasemat laatuluokkineen, residuaaleineen ja keskivirheineen (mm); `liitospisteet` = orientoinnin liitospisteet ja niiden vaakaresiduaalit |
@@ -84,8 +84,22 @@ Taulut (kaikki EPSG:3879):
 - `asemapisteet`: kolmio laatuluokan värillä (Erinomainen tummanvihreä, Hyvä vihreä, Tyydyttävä keltainen, Heikko oranssinpunainen, Huono punainen) ja reunus aseman omalla värillä, nimiönä aseman nimi
 - `asemien_liitokset`: viiva asemalta liitospisteeseen aseman omalla värillä (sama kuin asemapisteen reunus; korkeusliitos katkoviivana), nimiönä liitospiste ja dHz, yli 20 mm punaisella. Aseman väri tulee järjestysnumerosta `asema_nro` kymmenen värin paletista.
 - `mittausraportit`: violetti tähti, nimiönä lähdetiedosto
+- `kentalla_mitatut_pisteet`: ympyrä aseman värillä (asemattomat GNSS-pisteet harmaina), pistetunnus näkyy mittakaavassa 1:500 ja tarkemmin
 
 ![Esimerkki](qgis_tyylit/esimerkki.png)
+
+### Mittauksen animaatio
+
+Asemapisteet, liitosviivat ja mitatut pisteet voi toistaa QGIS:n aikasäätimellä (Temporal Controller) siinä järjestyksessä kuin ne mitattiin: ensin asema, sitten liitosviivat sitä mukaa kuin liitospisteet mitataan, sitten aseman mittaamat pisteet, sitten seuraava asema. Tahti on tasainen (yksi vaihe sekunnissa animaatioaikaa) eikä oikea mittausaika, joten tauot eivät näy. Järjestys (`jarjestys`) lasketaan tallennuksessa, ja kanta laskee siitä sarakkeen `animaatioaika` (1.1.2000 + jarjestys sekuntia), josta tyylit lukevat ajan.
+
+1. Lisää tasot `asemapisteet`, `asemien_liitokset` ja `kentalla_mitatut_pisteet` kannasta.
+2. Lataa kullekin tyyli erikseen: tason ominaisuudet → *Tyyli → Lataa tyyli → Tietokannasta* (tai `qgis_tyylit/<taulu>.qml`). QGIS ei ota aika-asetuksia mukaan, kun se käyttää kannan oletustyyliä tason lisäyksessä, mutta erikseen ladattuna ne tulevat.
+3. *Näytä → Paneelit → Aikasäädin* → *Animoitu aikanavigointi* (filminauha-kuvake) → *Aseta koko aikaväli* (nuolikuvake) → askel **1 sekunti** → ▶. Nopeus: asetuksista (ratas) kuvataajuus, esim. 5 ruutua sekunnissa.
+4. Useamman tiedoston mittaukset alkavat samaan aikaan; suodata tasot tarvittaessa lähdetiedostolla (`"lahdetiedosto" = 'työ.jxl'`). Animaation saa videoksi tai kuvasarjaksi aikasäätimen *Vie animaatio* -toiminnolla.
+
+Vain muutoksen jälkeen tallennetuilla mittauksilla on järjestys; vanhat rivit näkyvät koko animaation ajan.
+
+![Animaation vaiheet](qgis_tyylit/animaatio.png)
 
 Tyylit tehdään skriptillä `qgis_tyylit/tee_tyylit.py` QGIS:n Pythonilla (ohje skriptin alussa). Seinälinjan kaaret tallennetaan tihennettynä murtoviivana. Jos LiDAR-DXF oli mukana, viivalle tallennetaan myös poikkeama LiDAR-seinistä (`lidar_keskiarvo_cm`, `lidar_suurin_cm`, `lidar_peitto_pros`). Poisto-osio poistaa pisteet ja seinälinjat yhdessä.
 
