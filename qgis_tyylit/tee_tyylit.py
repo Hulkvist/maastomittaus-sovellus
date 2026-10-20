@@ -13,7 +13,8 @@ Ajetaan QGIS:n Pythonilla, esim. macOS:llä:
 Asemapisteillä, liitosviivoilla ja mitatuilla pisteillä on aika-asetus (sarake animaatioaika, jonka kanta
 laskee mittausjärjestyksestä jarjestys): QGIS:n aikasäädin (Temporal Controller) toistaa mittauksen
 tasaisessa tahdissa, yksi asema tai piste sekunnissa animaatioaikaa, ja aiemmat jäävät näkyviin.
-(Lausekepohjainen aika ei suodata PostGIS-tasoa QGIS 4.2:ssa, joten aika luetaan sarakkeesta.)
+(Lausekepohjainen aika ei suodata PostGIS-tasoa QGIS 4.2:ssa, joten aika luetaan sarakkeesta. Sarake on
+aikavyöhykkeellinen: aikasäädin toimii UTC-ajassa ja siirsi aikavyöhykkeettömän ajan 2-3 h.)
 """
 import os
 

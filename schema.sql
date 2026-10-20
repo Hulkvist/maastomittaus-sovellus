@@ -81,9 +81,6 @@ ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS mitattu TIMESTAMP;
 ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS asema TEXT;
 ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS asema_nro INT;
 ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS jarjestys INT;
--- animaatioaika: jarjestys sekunteina 1.1.2000 alkaen; QGIS:n aikasäädin lukee ajan tästä
-ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS animaatioaika
-    TIMESTAMP GENERATED ALWAYS AS (TIMESTAMP '2000-01-01' + jarjestys * INTERVAL '1 second') STORED;
 
 -- Mittauksista muodostetut seinälinjat (koodit 8/5/100), tallennetaan pisteiden
 -- kanssa samalla napilla. Saman kiinteistön ja lähdetiedoston viivat korvataan
@@ -161,8 +158,6 @@ CREATE INDEX IF NOT EXISTS idx_asemapisteet_geom ON asemapisteet USING GIST (geo
 ALTER TABLE asemapisteet ADD COLUMN IF NOT EXISTS liitospisteet TEXT;
 ALTER TABLE asemapisteet ADD COLUMN IF NOT EXISTS asema_nro INT;
 ALTER TABLE asemapisteet ADD COLUMN IF NOT EXISTS jarjestys INT;
-ALTER TABLE asemapisteet ADD COLUMN IF NOT EXISTS animaatioaika
-    TIMESTAMP GENERATED ALWAYS AS (TIMESTAMP '2000-01-01' + jarjestys * INTERVAL '1 second') STORED;
 
 -- Asemien orientoinnit: viiva asemalta jokaiseen liitospisteeseen ja korkeusliitokseen
 -- residuaaleineen (mm). QGIS: aseman värillä (asema_nro), kuten asemapisteen reunus.
@@ -185,8 +180,25 @@ CREATE TABLE IF NOT EXISTS asemien_liitokset (
 CREATE INDEX IF NOT EXISTS idx_asemien_liitokset_geom ON asemien_liitokset USING GIST (geom);
 ALTER TABLE asemien_liitokset ADD COLUMN IF NOT EXISTS asema_nro INT;
 ALTER TABLE asemien_liitokset ADD COLUMN IF NOT EXISTS jarjestys INT;
-ALTER TABLE asemien_liitokset ADD COLUMN IF NOT EXISTS animaatioaika
-    TIMESTAMP GENERATED ALWAYS AS (TIMESTAMP '2000-01-01' + jarjestys * INTERVAL '1 second') STORED;
+
+-- animaatioaika (kentalla_mitatut_pisteet, asemapisteet, asemien_liitokset): jarjestys sekunteina
+-- 1.1.2000 00:00 UTC alkaen; QGIS:n aikasäädin lukee ajan tästä. Aikavyöhykkeellinen, koska
+-- aikasäädin toimii UTC-ajassa: aikavyöhykkeetön sarake siirtyi siinä 2-3 h, eikä mitään näkynyt.
+-- Ensimmäinen versio oli aikavyöhykkeetön, joten se vaihdetaan (laskennallinen, ei tietoa häviä).
+DO $$
+DECLARE
+    taulu TEXT;
+BEGIN
+    FOREACH taulu IN ARRAY ARRAY['kentalla_mitatut_pisteet', 'asemapisteet', 'asemien_liitokset'] LOOP
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = taulu AND column_name = 'animaatioaika'
+                     AND data_type = 'timestamp without time zone') THEN
+            EXECUTE format('ALTER TABLE %I DROP COLUMN animaatioaika', taulu);
+        END IF;
+        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS animaatioaika TIMESTAMPTZ '
+                       'GENERATED ALWAYS AS (to_timestamp(946684800 + jarjestys)) STORED', taulu);
+    END LOOP;
+END $$;
 
 CREATE OR REPLACE FUNCTION kiintopisteet_saateella(
     p_kiinteistotunnus TEXT,
