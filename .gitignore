@@ -1,0 +1,12 @@
+__pycache__/
+.venv/
+.pytest_cache/
+.streamlit/secrets.toml
+qgis_plugin/maastomittaus/lib/
+qgis_plugin/dist/
+
+# Oikeat mittausaineistot (työmittauksia) eivät kuulu julkiseen repoon
+tests/data/jobxml/
+tests/data/*.krd
+*.jxl
+.DS_Store

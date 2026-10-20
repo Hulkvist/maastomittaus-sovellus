@@ -1,0 +1,12 @@
+streamlit
+requests
+psycopg2-binary
+shapely
+matplotlib
+contextily
+pyproj
+pillow
+reportlab
+ezdxf
+folium
+streamlit-folium

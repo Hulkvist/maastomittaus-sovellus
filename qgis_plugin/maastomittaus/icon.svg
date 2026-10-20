@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Lännen nopein seinälinja: cowboy-hattu seinälinjana. Vihreä = viivan alku (8), siniset = mitatut
+       kulmat, violetit = kaaripisteet (4), punainen risti = laskettu piilokulma. -->
+  <polygon points="3.0,42.0 10.0,46.0 22.0,49.0 42.0,49.0 54.0,46.0 61.0,42.0 50.0,41.0 47.0,39.0 46.0,20.0 38.0,15.0 32.0,20.0 26.0,15.0 18.0,20.0 17.0,39.0 14.0,41.0" fill="#9a6630" stroke="#1d1d1d" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+  <polyline points="17.5,34.0 46.5,34.0" fill="none" stroke="#4a2410" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="3" cy="42" r="3.0" fill="#2ca02c" stroke="#ffffff" stroke-width="0.9"/>
+  <circle cx="61" cy="42" r="2.3" fill="#1f77b4"/>
+  <circle cx="18" cy="20" r="2.3" fill="#1f77b4"/>
+  <circle cx="46" cy="20" r="2.3" fill="#1f77b4"/>
+  <path d="M29.4,17.4 L34.6,22.6 M34.6,17.4 L29.4,22.6" stroke="#d62728" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="10" cy="46" r="1.9" fill="#9467bd"/>
+  <circle cx="22" cy="49" r="1.9" fill="#9467bd"/>
+  <circle cx="42" cy="49" r="1.9" fill="#9467bd"/>
+  <circle cx="54" cy="46" r="1.9" fill="#9467bd"/>
+</svg>
