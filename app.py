@@ -1035,7 +1035,8 @@ if ladattu_tiedosto is not None and raportti:
                 st.warning("Anna kiinteistötunnus ennen tallennusta.")
             else:
                 tallennettavat = jx.pisteet_tallennettavaksi(kaikki_pisteet)
-                maara = jx.tallenna_mittaukset_kantaan(jobxml_tunnus_lopullinen.strip(), tallennettavat, hk.DB_CONN)
+                maara = jx.tallenna_mittaukset_kantaan(jobxml_tunnus_lopullinen.strip(), tallennettavat, hk.DB_CONN,
+                                                       raportti)
                 viivoja = (jx.tallenna_seinalinjat_kantaan(jobxml_tunnus_lopullinen.strip(), sl_tallennettava[0],
                                                            ladattu_tiedosto.name, hk.DB_CONN, sl_tallennettava[1])
                            if sl_tallennettava else 0)

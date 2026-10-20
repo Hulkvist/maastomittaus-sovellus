@@ -31,7 +31,7 @@ KARSITTAVAT = {
         "piirra_asemapiste_kartta", "piirra_yleiskartta", "muodosta_seinalinja", "pisteet_tallennettavaksi",
         "KRD_MITATUT", "KRD_LIITOKSET", "KRD_RTK", "KRD_KOODIMUUNNOS", "KRD_KOODISELITTEET", "KRD_TUNTEMATON_KOODI",
         "_krd_kirjainkoodi", "krd_koodi", "_krd_valitut", "krd_kirjainkoodit", "krd_pisteet", "kirjoita_krd",
-        "tallenna_mittaukset_kantaan", "tallenna_seinalinjat_kantaan", "poista_mittaukset_kannasta", "poista_mittaukset_lahdetiedostolla",
+        "_tallennettavat_asemat", "mittausjarjestys", "tallenna_mittaukset_kantaan", "tallenna_seinalinjat_kantaan", "poista_mittaukset_kannasta", "poista_mittaukset_lahdetiedostolla",
         "poista_kaikki_mittaukset", "MITTAUSTAULUT", "_poista_mittaukset", "LAATULUOKAT", "_huonoin_asema",
         "_mm_tai_none", "tallenna_raportti_kantaan", "_aseman_liitokset", "hae_raportit", "hae_raportin_pdf",
     ],

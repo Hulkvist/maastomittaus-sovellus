@@ -1450,26 +1450,88 @@ def kirjoita_krd(rivit):
 # Kannan tallennus JA poisto
 # ---------------------------------------------------------------------------
 
-def tallenna_mittaukset_kantaan(kiinteistotunnus, pisteet, db_conn):
+def _tallennettavat_asemat(raportti):
+    """Asemapisteet, joilla on koordinaatit; asema_nro = järjestysnumero tässä listassa (1, 2, ...)."""
+    return [a for a in (raportti or {}).get("asemapisteet") or [] if a.get("e") is not None and a.get("n") is not None]
+
+
+def mittausjarjestys(raportti, pisteet):
+    """Mittauksen eteneminen tasaisena järjestyksenä (QGIS-animaatio): asema, sitten siltä mitatut
+    pisteet aikajärjestyksessä, sitten seuraava asema jne. Asema alkaa sen ensimmäisestä havainnosta,
+    joten liitospisteet tulevat aseman jälkeen. Asemattomat pisteet (GNSS) omalla ajallaan; Asemapiste-
+    kategorian piste saa asemansa järjestyksen. Liitospisteiden RTK-alkuperäismittaukset eivät ole mukana.
+
+    Palauttaa (asemat, pisteiden_tiedot): asemat = {asema_nro: jarjestys} (asema_nro kuten
+    _tallennettavat_asemat()), pisteiden_tiedot = [(aseman nimi, asema_nro, jarjestys)] samassa
+    järjestyksessä kuin pisteet (Nonet, jos piste ei kuulu järjestykseen)."""
+    asemat = _tallennettavat_asemat(raportti)
+    srid_nro = {a.get("station_record_id"): nro for nro, a in enumerate(asemat, 1)}
+    nimi_nro = {}
+    for nro, a in enumerate(asemat, 1):
+        nimi_nro.setdefault(a["nimi"], nro)
+
+    def pisteen_asema(p):
+        if p.get("station_record_id") in srid_nro:
+            return srid_nro[p["station_record_id"]]
+        if p.get("kategoria") == "Asemapiste":
+            return nimi_nro.get(p.get("nimi"))
+        return None
+
+    viimeinen = datetime.max
+    alku = {nro: a.get("aikaleima") or viimeinen for nro, a in enumerate(asemat, 1)}
+    for p in pisteet:
+        nro = pisteen_asema(p)
+        if nro and p.get("aikaleima"):
+            alku[nro] = min(alku[nro], p["aikaleima"])
+    # (aika, 0 = asema ennen saman hetken pisteitä, alkuperäinen järjestys, avain)
+    tapahtumat = [(alku[nro], 0, nro, ("asema", nro)) for nro in alku]
+    for i, p in enumerate(pisteet):
+        if p.get("kategoria") == "Liitospiste (alkuperäinen RTK-mittaus)":
+            continue
+        if p.get("kategoria") == "Asemapiste" and pisteen_asema(p):
+            continue
+        tapahtumat.append((p.get("aikaleima") or viimeinen, 1, i, ("piste", i)))
+    jarjestys = {avain: n for n, (_, _, _, avain) in enumerate(sorted(tapahtumat), 1)}
+
+    asemien = {nro: jarjestys[("asema", nro)] for nro in alku}
+    tiedot = []
+    for i, p in enumerate(pisteet):
+        nro = pisteen_asema(p)
+        nimi = asemat[nro - 1]["nimi"] if nro else None
+        if ("piste", i) in jarjestys:
+            tiedot.append((nimi, nro, jarjestys[("piste", i)]))
+        elif nro and p.get("kategoria") == "Asemapiste":
+            tiedot.append((nimi, nro, asemien[nro]))
+        else:
+            tiedot.append((None, None, None))
+    return asemien, tiedot
+
+
+def tallenna_mittaukset_kantaan(kiinteistotunnus, pisteet, db_conn, raportti=None):
+    """Pisteet kentalla_mitatut_pisteet-tauluun. raportti (jasenna_tyo()-tulos) antaa pisteille
+    aseman ja mittausjärjestyksen (QGIS-animaatio); ilman sitä ne jäävät tyhjiksi."""
     import hae_kiintopisteet as hk
 
     if not pisteet:
         return 0
+    _, jarjestys = mittausjarjestys(raportti, pisteet) if raportti else (None, [(None, None, None)] * len(pisteet))
     lisatty = 0
     with hk.kanta(db_conn) as cur:
-        for p in pisteet:
+        for p, (asema, asema_nro, nro) in zip(pisteet, jarjestys):
             if p.get("e") is None or p.get("n") is None:
                 continue
             # kuvaus = pisteen kategoria, tarkkuusluokka = pistekoodi
             cur.execute(
                 f"""INSERT INTO kentalla_mitatut_pisteet
                     (kiinteistotunnus, pistetunnus, kuvaus, mittaustapa, tarkkuusluokka,
-                     vinoetaisyys, satelliitteja, pdop, korkeus, lahdetiedosto, geom)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                     vinoetaisyys, satelliitteja, pdop, korkeus, lahdetiedosto, mitattu, asema, asema_nro,
+                     jarjestys, geom)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             ST_SetSRID(ST_MakePoint(%s, %s), {DB_SRID}));""",
                 (kiinteistotunnus, p["nimi"], p.get("kategoria"), p.get("mittaustapa"), p.get("koodi"),
                  (p.get("havainto") or {}).get("sd_m"), p.get("satelliitteja"), p.get("pdop"),
-                 p.get("korkeus"), p.get("lahdetiedosto"), p["e"], p["n"]),
+                 p.get("korkeus"), p.get("lahdetiedosto"), p.get("aikaleima"), asema, asema_nro, nro,
+                 p["e"], p["n"]),
             )
             lisatty += 1
     return lisatty
@@ -1543,7 +1605,11 @@ def tallenna_raportti_kantaan(kiinteistotunnus, raportti, pisteet, hylatyt, pdf,
         [" ".join(x for x in (t.get("malli") or t.get("tyyppi"), t.get("sarjanumero")) if x)
          for t in kalusto.get("takymetrit", [])]
         + [" ".join(x for x in (g.get("vastaanotin"), g.get("sarjanumero")) if x) for g in kalusto.get("gnss", [])])
-    asemat = [a for a in raportti.get("asemapisteet") or [] if a.get("e") is not None and a.get("n") is not None]
+    asemat = _tallennettavat_asemat(raportti)
+    asemien_jarjestys, pisteiden_jarjestys = mittausjarjestys(raportti, pisteet)   # sama kuin pisteillä
+    # liitosviiva ilmestyy, kun asema mittaa liitospisteen (muuten aseman kanssa)
+    liitoksen_jarjestys = {(nro, p["nimi"]): j for p, (_, nro, j) in zip(pisteet, pisteiden_jarjestys)
+                           if nro and p.get("kategoria") in ("Liitospiste", "Korkeusliitos")}
     huonoin = _huonoin_asema(asemat)
     huonoin_laatu = (huonoin or {}).get("laatu") or {}
     mitatut = [p for p in pisteet if p["kategoria"] in mr.MITATUT_KATEGORIAT and p.get("e") is not None]
@@ -1579,24 +1645,28 @@ def tallenna_raportti_kantaan(kiinteistotunnus, raportti, pisteet, hylatyt, pdf,
             for l in liitokset:
                 cur.execute(
                     f"""INSERT INTO asemien_liitokset
-                        (kiinteistotunnus, lahdetiedosto, asema, asema_nro, liitospiste, tyyppi, delta_n_mm,
-                         delta_e_mm, dhz_mm, dh_mm, kaytto, pituus_m, geom)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        (kiinteistotunnus, lahdetiedosto, asema, asema_nro, jarjestys, liitospiste, tyyppi,
+                         delta_n_mm, delta_e_mm, dhz_mm, dh_mm, kaytto, pituus_m, geom)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 ST_SetSRID(ST_MakeLine(ST_MakePoint(%s, %s), ST_MakePoint(%s, %s)), {DB_SRID}));""",
-                    (kiinteistotunnus, lahdetiedosto, a["nimi"], asema_nro, l["liitospiste"], l["tyyppi"],
+                    (kiinteistotunnus, lahdetiedosto, a["nimi"], asema_nro,
+                     liitoksen_jarjestys.get((asema_nro, l["liitospiste"]), asemien_jarjestys[asema_nro]),
+                     l["liitospiste"], l["tyyppi"],
                      _mm_tai_none(l["delta_n"]), _mm_tai_none(l["delta_e"]), _mm_tai_none(l["dhz"]),
                      _mm_tai_none(l["delta_h"]), l["kaytto"], round(math.dist((a["e"], a["n"]), (l["e"], l["n"])), 3),
                      a["e"], a["n"], l["e"], l["n"]),
                 )
             cur.execute(
                 f"""INSERT INTO asemapisteet
-                    (kiinteistotunnus, lahdetiedosto, asema, asema_nro, maarittely, laatuluokka, laatupisteet,
+                    (kiinteistotunnus, lahdetiedosto, asema, asema_nro, jarjestys, maarittely, laatuluokka,
+                     laatupisteet,
                      rms_residuaali_mm, suurin_residuaali_mm, liitospisteita, kulmapeitto_deg, pdop_keskiarvo,
                      keskivirhe_n_mm, keskivirhe_e_mm, keskivirhe_h_mm, korkeus, kojekorkeus, mitattu,
                      varoitukset, liitospisteet, geom)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             ST_SetSRID(ST_MakePoint(%s, %s), {DB_SRID}));""",
-                (kiinteistotunnus, lahdetiedosto, a["nimi"], asema_nro, a.get("maarittely"), laatu.get("luokka"),
+                (kiinteistotunnus, lahdetiedosto, a["nimi"], asema_nro, asemien_jarjestys[asema_nro],
+                 a.get("maarittely"), laatu.get("luokka"),
                  round(laatu["kokonaispiste"], 1) if laatu.get("kokonaispiste") is not None else None,
                  _mm_tai_none(laatu.get("rms_residuaali_m")), _mm_tai_none(laatu.get("suurin_residuaali_m")),
                  laatu.get("liitospisteita"),

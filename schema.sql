@@ -74,6 +74,16 @@ CREATE TABLE IF NOT EXISTS kentalla_mitatut_pisteet (
     geom geometry(Point, 3879)
 );
 CREATE INDEX IF NOT EXISTS idx_kentalla_mitatut_pisteet_geom ON kentalla_mitatut_pisteet USING GIST (geom);
+-- Lisätty myöhemmin: mittausaika, asema, jolta piste mitattiin (asema_nro kuten asemapisteet-taulussa),
+-- ja jarjestys = mittauksen eteneminen tasaisena järjestyksenä (asema, sen pisteet, seuraava asema ...)
+-- QGIS-animaatiota varten; sama numerointi asemapisteet- ja asemien_liitokset-tauluissa.
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS mitattu TIMESTAMP;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS asema TEXT;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS asema_nro INT;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS jarjestys INT;
+-- animaatioaika: jarjestys sekunteina 1.1.2000 alkaen; QGIS:n aikasäädin lukee ajan tästä
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS animaatioaika
+    TIMESTAMP GENERATED ALWAYS AS (TIMESTAMP '2000-01-01' + jarjestys * INTERVAL '1 second') STORED;
 
 -- Mittauksista muodostetut seinälinjat (koodit 8/5/100), tallennetaan pisteiden
 -- kanssa samalla napilla. Saman kiinteistön ja lähdetiedoston viivat korvataan
@@ -150,6 +160,9 @@ CREATE INDEX IF NOT EXISTS idx_asemapisteet_geom ON asemapisteet USING GIST (geo
 -- aseman järjestysnumero tiedostossa (QGIS-tyyli laskee siitä aseman värin)
 ALTER TABLE asemapisteet ADD COLUMN IF NOT EXISTS liitospisteet TEXT;
 ALTER TABLE asemapisteet ADD COLUMN IF NOT EXISTS asema_nro INT;
+ALTER TABLE asemapisteet ADD COLUMN IF NOT EXISTS jarjestys INT;
+ALTER TABLE asemapisteet ADD COLUMN IF NOT EXISTS animaatioaika
+    TIMESTAMP GENERATED ALWAYS AS (TIMESTAMP '2000-01-01' + jarjestys * INTERVAL '1 second') STORED;
 
 -- Asemien orientoinnit: viiva asemalta jokaiseen liitospisteeseen ja korkeusliitokseen
 -- residuaaleineen (mm). QGIS: aseman värillä (asema_nro), kuten asemapisteen reunus.
@@ -171,6 +184,9 @@ CREATE TABLE IF NOT EXISTS asemien_liitokset (
 );
 CREATE INDEX IF NOT EXISTS idx_asemien_liitokset_geom ON asemien_liitokset USING GIST (geom);
 ALTER TABLE asemien_liitokset ADD COLUMN IF NOT EXISTS asema_nro INT;
+ALTER TABLE asemien_liitokset ADD COLUMN IF NOT EXISTS jarjestys INT;
+ALTER TABLE asemien_liitokset ADD COLUMN IF NOT EXISTS animaatioaika
+    TIMESTAMP GENERATED ALWAYS AS (TIMESTAMP '2000-01-01' + jarjestys * INTERVAL '1 second') STORED;
 
 CREATE OR REPLACE FUNCTION kiintopisteet_saateella(
     p_kiinteistotunnus TEXT,

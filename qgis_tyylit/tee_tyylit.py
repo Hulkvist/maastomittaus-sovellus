@@ -8,6 +8,12 @@ Ajetaan QGIS:n Pythonilla, esim. macOS:llä:
 - asemien_liitokset: viiva asemalta liitospisteeseen aseman omalla värillä (korkeusliitos katkoviivana),
   nimiö liitospiste ja dHz (yli 20 mm punaisella)
 - mittausraportit: iso violetti tähti, nimiö "Raportti" ja lähdetiedosto
+- kentalla_mitatut_pisteet: ympyrä aseman värillä (asemattomat GNSS-pisteet harmaina), pistetunnus lähellä
+
+Asemapisteillä, liitosviivoilla ja mitatuilla pisteillä on aika-asetus (sarake animaatioaika, jonka kanta
+laskee mittausjärjestyksestä jarjestys): QGIS:n aikasäädin (Temporal Controller) toistaa mittauksen
+tasaisessa tahdissa, yksi asema tai piste sekunnissa animaatioaikaa, ja aiemmat jäävät näkyviin.
+(Lausekepohjainen aika ei suodata PostGIS-tasoa QGIS 4.2:ssa, joten aika luetaan sarakkeesta.)
 """
 import os
 
@@ -35,7 +41,16 @@ ASEMAN_VARI = (f"array_get(array({', '.join(repr(v) for v in ASEMAN_VARIT)}), "
                f"(coalesce(\"asema_nro\", 1) - 1) % {len(ASEMAN_VARIT)})")
 
 
-def _nimio(layer, lauseke, sijoittelu, koko=9, vari=None):
+def _animaatio(layer):
+    """Aikasäätimen asetus: kohde näkyy järjestyksensä hetkestä alkaen ja jää näkyviin."""
+    aika = layer.temporalProperties()
+    aika.setIsActive(True)
+    aika.setMode(Qgis.VectorTemporalMode.FeatureDateTimeInstantFromField)
+    aika.setStartField("animaatioaika")   # vanhat rivit ilman järjestystä näkyvät koko ajan
+    aika.setAccumulateFeatures(True)
+
+
+def _nimio(layer, lauseke, sijoittelu, koko=9, vari=None, lahella=False):
     asetukset = QgsPalLayerSettings()
     asetukset.fieldName = lauseke
     asetukset.isExpression = True
@@ -52,13 +67,17 @@ def _nimio(layer, lauseke, sijoittelu, koko=9, vari=None):
     asetukset.setFormat(muoto)
     if vari:
         asetukset.dataDefinedProperties().setProperty(QgsPalLayerSettings.Property.Color, QgsProperty.fromExpression(vari))
+    if lahella:   # vain lähelle zoomattuna (mittakaava 1:500 tai tarkempi)
+        asetukset.scaleVisibility = True
+        asetukset.minimumScale = 500
+        asetukset.maximumScale = 0
     layer.setLabeling(QgsVectorLayerSimpleLabeling(asetukset))
     layer.setLabelsEnabled(True)
 
 
 def asemapisteet():
-    layer = QgsVectorLayer("Point?crs=EPSG:3879&field=asema:string&field=asema_nro:integer&field=laatuluokka:string",
-                           "asemapisteet", "memory")
+    layer = QgsVectorLayer("Point?crs=EPSG:3879&field=asema:string&field=asema_nro:integer&field=laatuluokka:string"
+                           "&field=jarjestys:integer&field=animaatioaika:datetime", "asemapisteet", "memory")
     luokat = []
     for luokka, vari in LAATUVARIT:
         # alla iso kolmio aseman värillä (reunus, sama kuin liitosviivoissa), päällä laatuluokan väri
@@ -71,12 +90,13 @@ def asemapisteet():
         luokat.append(QgsRendererCategory(luokka, symboli, luokka))
     layer.setRenderer(QgsCategorizedSymbolRenderer("laatuluokka", luokat))
     _nimio(layer, '"asema"', Qgis.LabelPlacement.AroundPoint)
+    _animaatio(layer)
     return layer
 
 
 def asemien_liitokset():
     layer = QgsVectorLayer("LineString?crs=EPSG:3879&field=asema_nro:integer&field=liitospiste:string"
-                           "&field=tyyppi:string&field=dhz_mm:double", "asemien_liitokset", "memory")
+                           "&field=tyyppi:string&field=dhz_mm:double&field=jarjestys:integer&field=animaatioaika:datetime", "asemien_liitokset", "memory")
     symboli = QgsLineSymbol.createSimple({"line_color": "0,0,0", "line_width": "0.6"})
     viiva = symboli.symbolLayer(0)
     viiva.setDataDefinedProperty(QgsSymbolLayer.Property.StrokeColor, QgsProperty.fromExpression(ASEMAN_VARI))
@@ -85,6 +105,21 @@ def asemien_liitokset():
     layer.setRenderer(QgsSingleSymbolRenderer(symboli))
     _nimio(layer, '"liitospiste" || coalesce(\' \' || format_number("dhz_mm", 1) || \' mm\', \'\')',
            Qgis.LabelPlacement.Line, koko=8, vari="if(\"dhz_mm\" >= 20, '215,25,28,255', '0,0,0,255')")
+    _animaatio(layer)
+    return layer
+
+
+def kentalla_mitatut_pisteet():
+    layer = QgsVectorLayer("Point?crs=EPSG:3879&field=pistetunnus:string&field=asema_nro:integer"
+                           "&field=jarjestys:integer&field=animaatioaika:datetime", "kentalla_mitatut_pisteet", "memory")
+    symboli = QgsMarkerSymbol.createSimple({"name": "circle", "color": "120,120,120", "outline_color": "35,35,35",
+                                            "outline_width": "0.2", "size": "2"})
+    symboli.symbolLayer(0).setDataDefinedProperty(
+        QgsSymbolLayer.Property.FillColor,
+        QgsProperty.fromExpression(f'if("asema_nro" IS NULL, \'120,120,120\', {ASEMAN_VARI})'))
+    layer.setRenderer(QgsSingleSymbolRenderer(symboli))
+    _nimio(layer, '"pistetunnus"', Qgis.LabelPlacement.AroundPoint, koko=7, lahella=True)
+    _animaatio(layer)
     return layer
 
 
@@ -100,7 +135,7 @@ def mittausraportit():
 def qml(layer):
     doc = QDomDocument()
     virhe = layer.exportNamedStyle(doc, categories=QgsMapLayer.StyleCategory.Symbology
-                                   | QgsMapLayer.StyleCategory.Labeling)
+                                   | QgsMapLayer.StyleCategory.Labeling | QgsMapLayer.StyleCategory.Temporal)
     if virhe:
         raise RuntimeError(virhe)
     return doc.toString(2)
@@ -154,7 +189,7 @@ def main():
     app = QgsApplication([], False)
     app.initQgis()
     tyylit = []
-    for tee in (asemapisteet, asemien_liitokset, mittausraportit):
+    for tee in (asemapisteet, asemien_liitokset, mittausraportit, kentalla_mitatut_pisteet):
         layer = tee()
         teksti = qml(layer)
         with open(os.path.join(KANSIO, f"{layer.name()}.qml"), "w", encoding="utf-8") as f:
