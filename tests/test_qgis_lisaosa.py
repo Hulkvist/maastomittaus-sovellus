@@ -146,7 +146,8 @@ def test_karsitut_kopiot_toimivat_ilman_kanta_ja_kuvakoodia(tmp_path):
         lahde = rakenna.jaettu_lahde(os.path.join(HAKEMISTO, nimi))
         for poistettu in rakenna.KARSITTAVAT[nimi]:
             assert f"def {poistettu}(" not in lahde and f"\n{poistettu} = " not in lahde
-        for kielletty in ("INSERT", "DELETE", "TRUNCATE", "kentalla_mitatut", "psycopg2", "ezdxf", "matplotlib"):
+        for kielletty in ("INSERT", "DELETE", "TRUNCATE", "kentalla_mitatut", "psycopg2", "import ezdxf",
+                          "matplotlib"):
             assert kielletty not in lahde, (nimi, kielletty)
         (tmp_path / nimi).write_text(lahde, encoding="utf-8")
     koodi = ("import json, sys\n"
@@ -372,6 +373,10 @@ def test_lue_las_xyz_ja_las_alue(tmp_path):
     with pytest.raises(ValueError):
         ydin.lue_las_xyz(str(tmp_path / "p.laz"))
     assert ydin.las_alue(str(tmp_path / "p.laz")) == ydin.las_alue(polku)
+    # Paikallinen float32-luku paloittain: kartan koordinaatti = paikallinen + siirto
+    paikallinen, origo = ydin.lue_las_paikallinen(polku, osa=2)
+    assert paikallinen.dtype == np.float32 and tuple(origo) == (E0 - 3.0, N0, 0.0)
+    assert np.allclose(paikallinen + origo, xyz, atol=1e-5)
     (tmp_path / "x.las").write_bytes(b"ei las")
     assert ydin.las_alue(str(tmp_path / "x.las")) is None
 

@@ -105,6 +105,13 @@ def _tyylita(layer, laji, luokat=None):
                                       lambda vari: QgsLineSymbol.createSimple(
                                           {"color": vari, "width": "1.2" if vari.startswith("148") else "0.6",
                                            "line_style": "solid" if vari.startswith("148") else "dash"})))
+    elif laji == "pilven_seinat":
+        # Seinälinjat pistepilvestä: värit kuten lidarscanin seinä-DXF:n tyylissä (qgis/seinalinjat.qml)
+        layer.setRenderer(_luokittain("taso", [("SEINA", "220,30,30"), ("EPAVARMA", "255,140,0"),
+                                               ("PAATELTY", "150,150,150")],
+                                      lambda vari: QgsLineSymbol.createSimple(
+                                          {"color": vari, "width": "0.8",
+                                           "line_style": "dash" if vari.startswith("150") else "solid"})))
     elif laji == "poikkeama":
         layer.setRenderer(_luokittain("luokka", [(luokka, vari) for _, luokka, vari in
                                                  (luokat or ydin.POIKKEAMALUOKAT)], _piste))

@@ -22,7 +22,7 @@ if _LIB and os.path.isdir(_LIB):
     if _LIB in sys.path:
         sys.path.remove(_LIB)
     sys.path.insert(0, _LIB)
-    for _nimi in ("seinalinja", "jobxml_tuonti"):
+    for _nimi in ("seinalinja", "jobxml_tuonti", "seinat_pilvesta"):
         sys.modules.pop(_nimi, None)
 
 import jobxml_tuonti as jx  # noqa: E402
@@ -313,6 +313,36 @@ def lue_las_xyz(polku):
         data = np.frombuffer(f.read(maara * pituus), dtype=np.uint8).reshape(maara, pituus)
     xyz_int = data[:, :12].copy().view("<i4").reshape(maara, 3)
     return xyz_int * np.array(skaala) + np.array(siirto)
+
+
+def lue_las_paikallinen(polku, osa=5_000_000):
+    """Pakkaamattoman LAS-tiedoston pisteet paikallisina float32-koordinaatteina (n x 3) ja siirto
+    (e0, n0, 0): kartan koordinaatti = paikallinen + siirto. Puolet vähemmän muistia kuin lue_las_xyz,
+    ja luku paloittain, joten iso pilvi (Stonex, kymmeniä miljoonia pisteitä) mahtuu muistiin."""
+    import numpy as np
+
+    with open(polku, "rb") as f:
+        otsikko = f.read(375)
+    if otsikko[:4] != b"LASF":
+        raise ValueError(f"Ei LAS-tiedosto: {polku}")
+    if otsikko[104] & 0x80 or otsikko[104] & 0x40:
+        raise ValueError("Pakattu LAS (LAZ) -- pura ensin LAS-muotoon")
+    alku, = struct.unpack("<I", otsikko[96:100])
+    pituus, = struct.unpack("<H", otsikko[105:107])
+    maara, = struct.unpack("<I", otsikko[107:111])
+    if maara == 0 and otsikko[25] >= 4:      # LAS 1.4: 64-bittinen pistemäärä
+        maara, = struct.unpack("<Q", otsikko[247:255])
+    skaala = np.array(struct.unpack("<3d", otsikko[131:155]))
+    siirto = np.array(struct.unpack("<3d", otsikko[155:179]))
+    _, min_x, _, min_y = struct.unpack("<4d", otsikko[179:211])
+    origo = np.array([math.floor(min_x), math.floor(min_y), 0.0])
+    tietue = np.dtype([("xyz", "<i4", (3,)), ("muut", f"V{pituus - 12}")])
+    data = np.memmap(polku, dtype=tietue, mode="r", offset=alku, shape=(maara,))
+    xyz = np.empty((maara, 3), dtype=np.float32)
+    for i in range(0, maara, osa):
+        xyz[i:i + osa] = data["xyz"][i:i + osa] * skaala + (siirto - origo)
+    del data
+    return xyz, origo
 
 
 def _ulkonormaali(viiva, a, b):

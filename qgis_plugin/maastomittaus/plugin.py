@@ -20,6 +20,7 @@ NAPIN_TEKSTI = "LNS"
 ALGORITMI = "maastomittaus:seinalinja_jxl"
 VERTAILU = ("Vertaa seinälinjaa LiDARiin", "maastomittaus:vertaa_seinalinjaa_lidariin")
 KORJAUS = ("Korjaa pistepilven koordinaatisto", "maastomittaus:korjaa_pistepilven_koordinaatisto")
+PILVESTA = ("Seinälinjat pistepilvestä", "maastomittaus:seinalinjat_pistepilvesta")
 
 # Etsintäkuulutuksen näköinen nappi: paperin värinen tausta, ruskea kehys ja lännen fontti.
 # Tausta on aina vaalea, joten teksti erottuu myös tummassa teemassa.
@@ -53,6 +54,7 @@ class MaastomittausPlugin:
         self.toiminto = None
         self.vertailu = None
         self.korjaus = None
+        self.pilvesta = None
         self.tyokalupalkki = None
 
     def initProcessing(self):  # noqa: N802
@@ -77,6 +79,9 @@ class MaastomittausPlugin:
         self.vertailu = QAction(VERTAILU[0], self.iface.mainWindow())
         self.vertailu.triggered.connect(self.avaa_vertailu)
         self.iface.addPluginToMenu(VALIKKO, self.vertailu)
+        self.pilvesta = QAction(PILVESTA[0], self.iface.mainWindow())
+        self.pilvesta.triggered.connect(lambda: self.avaa_valinnalla(PILVESTA[1], "ALUE"))
+        self.iface.addPluginToMenu(VALIKKO, self.pilvesta)
         self.korjaus = QAction(KORJAUS[0], self.iface.mainWindow())
         self.korjaus.triggered.connect(lambda: self.avaa(KORJAUS[1]))
         self.iface.addPluginToMenu(VALIKKO, self.korjaus)
@@ -88,18 +93,22 @@ class MaastomittausPlugin:
     def avaa_vertailu(self):
         """Vertailu: jos aktiivisella tasolla on valittuja kohteita (esim. talo kantakartalta), ne
         tulevat seinälinjaksi valmiiksi (Vain valitut kohteet)."""
+        self.avaa_valinnalla(VERTAILU[1], "SEINALINJA")
+
+    def avaa_valinnalla(self, algoritmi, parametri):
+        """Työkalu auki niin, että aktiivisen tason valitut kohteet ovat parametrissa valmiina."""
         from qgis.core import QgsProcessingFeatureSourceDefinition, QgsVectorLayer
         taso = self.iface.activeLayer()
         if isinstance(taso, QgsVectorLayer) and taso.selectedFeatureCount():
-            self.avaa(VERTAILU[1], {"SEINALINJA": QgsProcessingFeatureSourceDefinition(taso.id(), True)})
+            self.avaa(algoritmi, {parametri: QgsProcessingFeatureSourceDefinition(taso.id(), True)})
         else:
-            self.avaa(VERTAILU[1])
+            self.avaa(algoritmi)
 
     def unload(self):
-        for toiminto in (self.toiminto, self.vertailu, self.korjaus):
+        for toiminto in (self.toiminto, self.vertailu, self.pilvesta, self.korjaus):
             if toiminto is not None:
                 self.iface.removePluginMenu(VALIKKO, toiminto)
-        self.toiminto = self.vertailu = self.korjaus = None
+        self.toiminto = self.vertailu = self.pilvesta = self.korjaus = None
         if self.tyokalupalkki is not None:
             self.tyokalupalkki.deleteLater()
             self.tyokalupalkki = None

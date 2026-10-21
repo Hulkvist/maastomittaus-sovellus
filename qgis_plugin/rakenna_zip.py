@@ -3,8 +3,8 @@ rakenna_zip.py -- Tekee QGIS:iin asennettavan lisäosan Lännen nopein seinälin
 (qgis_plugin/dist/lannen_nopein_seinalinja.zip) ja saman työkalun yhtenä Processing-skriptinä
 (qgis_plugin/dist/lannen_nopein_seinalinja_skripti.py).
 
-Kopioi sovelluksen jobxml_tuonti.py:n ja seinalinja.py:n lisäosan lib-kansioon, jotta
-lisäosa käyttää samaa koodia kuin sovellus. Kopioista karsitaan osat, joita seinälinja ei
+Kopioi sovelluksen jobxml_tuonti.py:n, seinalinja.py:n ja seinat_pilvesta.py:n lisäosan
+lib-kansioon, jotta lisäosa käyttää samaa koodia kuin sovellus (ja lidarscanin lidarpipe). Kopioista karsitaan osat, joita seinälinja ei
 tarvitse (kantaan tallennus ja poistot, krd-vienti, kuvat, DXF), ks. KARSITTAVAT.
 Aja aina, kun niitä on muutettu:
 
@@ -23,7 +23,7 @@ import zipfile
 KANSIO = os.path.dirname(os.path.abspath(__file__))
 SOVELLUS = os.path.dirname(KANSIO)
 LISAOSA = os.path.join(KANSIO, "maastomittaus")   # kansion nimi pysyy, jotta päivitys korvaa vanhan
-JAETUT = ["jobxml_tuonti.py", "seinalinja.py"]
+JAETUT = ["jobxml_tuonti.py", "seinalinja.py", "seinat_pilvesta.py"]
 # Ylimmän tason funktiot ja vakiot, joita lisäosa ei tarvitse: ne jätetään pois lisäosasta ja
 # skriptistä (mm. kannan taulut ja SQL eivät päädy jaettavaan tiedostoon).
 KARSITTAVAT = {
@@ -37,6 +37,8 @@ KARSITTAVAT = {
     ],
     "seinalinja.py": ["rajaa_viivaan", "_KOODIVARIT", "piirra_seinalinja_kartta", "dxf_taso", "kirjoita_dxf",
                       "lue_lidar_dxf"],
+    # lidarpipen DXF-vienti tarvitsee ezdxf:n; lisäosa kirjoittaa DXF:n write_dxf_r12:lla
+    "seinat_pilvesta.py": ["write_dxf"],
 }
 ZIP_NIMI = "lannen_nopein_seinalinja.zip"
 SKRIPTIN_NIMI = "lannen_nopein_seinalinja_skripti.py"
