@@ -118,3 +118,13 @@ def test_line_below_window_band():
     south = [_surface(rng, (0, 0), (12, 0), 0, 1.1), _surface(rng, (0, 0), (12, 0), 1.1, 2.5, offset=0.14, density=1500)]
     [wall] = [s for s in _south(extract_walls(_house(rng, south), WallOptions())) if s.length > 5]
     assert abs(wall.p0[1]) < 0.01 and wall.info["sokkeli"] is None
+
+
+def test_low_wall_under_window_band_found_with_iphone_profile():
+    """Matala puuseinä (0,4–1,1 m) koko seinän mittaisen ikkunanauhan alla (lasi 14 cm sisempänä, harva):
+    solu ei yksin peitä puolta korkeudesta, mutta 0,5 m ympäristö peittää. Linja puuseinään."""
+    rng = np.random.default_rng(8)
+    south = [_surface(rng, (0, 0), (12, 0), 0.4, 1.1), _surface(rng, (0, 0), (12, 0), 1.1, 2.5, offset=0.14,
+                                                                    density=1000)]
+    segs = [s for s in _south(extract_walls(_house(rng, south), WallOptions())) if s.length > 5]
+    assert len(segs) == 1 and abs(segs[0].p0[1]) < 0.01 and abs(segs[0].p1[1]) < 0.01, [(s.p0, s.p1) for s in segs]

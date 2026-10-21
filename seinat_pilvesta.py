@@ -32,7 +32,9 @@ class WallOptions:
     cover_top: float = 1.8       # seinäsolussa on oltava pisteitä tätä ylempänä (aidat, autot ja pensaat pois) [m]
     voxel: float = 0.0           # tunnistuksen harvennus (0 = ei): Stonexin raskas pilvi [m]
     cover_layer: float = 0.1     # korkeuskerroksen paksuus [m]
-    cover_ratio: float = 0.5     # vähimmäisosuus kerroksista, joissa solulla on pisteitä
+    cover_ratio: float = 0.5     # vähimmäisosuus kerroksista, joissa solulla (tai 0,5 m ympäristöllä) on pisteitä
+    cell_layers: int = 5         # ympäristön peitolla solulta itseltään vaaditaan näin monta kerrosta
+    cover_near: bool = True      # peitto myös 0,5 m ympäristöstä (Stonexilla pois: puut ja autot täyttäisivät sen)
     inlier_tol: float = 0.03     # RANSAC-toleranssi [m] (noin 3 × pinnan kohina)
     min_length: float = 0.3      # lyhin hyväksytty seinäsegmentti [m]
     max_gap: float = 0.3         # suurempi aukko katkaisee segmentin [m]
@@ -88,8 +90,8 @@ class WallOptions:
 # palat voivat olla eri kohdissa). Stonex: tiheä ja tarkka, raskas (kymmeniä miljoonia pisteitä).
 PROFILES = {
     "iphone": {},
-    "stonex": dict(voxel=0.03, wall_cell=0.03, cover_top=2.2, facade_max=3.5, inlier_tol=0.03, wall_offset=0.04,
-                   outline_offset=0.06, facade_tol=0.01),
+    "stonex": dict(voxel=0.03, wall_cell=0.03, cover_top=2.2, cover_near=False, facade_max=3.5, inlier_tol=0.03,
+                   wall_offset=0.04, outline_offset=0.06, facade_tol=0.01),
 }
 
 
@@ -265,7 +267,24 @@ def wall_cells(xyz: np.ndarray, rel: np.ndarray, opt: WallOptions) -> np.ndarray
     n_layers = int(np.ceil((opt.cover_max - opt.cover_min) / opt.cover_layer))
     uniq = np.unique(flat * (n_layers + 1) + layer)
     cells, counts = np.unique(uniq // (n_layers + 1), return_counts=True)
-    good = cells[counts >= opt.cover_ratio * n_layers]
+    # Peitto myös 0,5 m ympäristöstä (kaksi puolen ruudun verran siirrettyä ruudukkoa): matala seinä
+    # ikkunanauhan alla (esim. 0,4–1,1 m puuseinä, lasi 14 cm sisempänä) on seinää, kun pinnat yhdessä
+    # peittävät korkeuden. Solulta itseltään vaaditaan silloin cell_layers yhtenäistä kerrosta.
+    centres = (np.column_stack([cells // width, cells % width]) + off + 0.5) * opt.wall_cell
+    near = np.zeros(len(cells))
+    for shift in ((0.0, 0.25) if opt.cover_near else ()):
+        ck = np.floor((xy + shift) / 0.5).astype(np.int64)
+        ck -= ck.min(0)
+        cw = int(ck[:, 1].max()) + 1
+        ckey = ck[:, 0] * cw + ck[:, 1]
+        cu = np.unique(ckey * (n_layers + 1) + layer)
+        ccells, ccounts = np.unique(cu // (n_layers + 1), return_counts=True)
+        q = np.floor((centres + shift) / 0.5).astype(np.int64) - np.floor((xy + shift) / 0.5).astype(np.int64).min(0)
+        qk = q[:, 0] * cw + q[:, 1]
+        pos = np.clip(np.searchsorted(ccells, qk), 0, len(ccells) - 1)
+        near = np.maximum(near, np.where(ccells[pos] == qk, ccounts[pos], 0))
+    ratio = opt.cover_ratio * n_layers
+    good = cells[(counts >= ratio) | ((counts >= opt.cell_layers) & (near >= ratio))]
     good = np.intersect1d(good, flat[high])
     sel = np.isin(flat, good)
     inv = np.searchsorted(good, flat[sel])
@@ -398,42 +417,39 @@ def _surfaces(layers: np.ndarray, tol: float) -> list[np.ndarray]:
 
 def _facade(layers: np.ndarray, opt: WallOptions):
     """Julkisivun paikka korkeuskerroksista (kartoituskäytäntö: sokkelin yläpuolelta ja ikkunanauhan
-    alapuolelta). Kerrokset jaetaan pinnoiksi alhaalta ylös (_surfaces). Matalat pinnat (yläreuna enintään
-    plinth_max), joiden yläpuolella on yhtä tiheä pinta, ovat sokkelia (myös 1,3 m kivijalka); julkisivu on
-    ensimmäinen pinta sokkelin yläpuolella (ylempänä oleva harvempi ikkunanauha tai ulkoneva yläosa ei siirrä
-    linjaa). Ilman sokkelia julkisivu on alin pinta, joka ulottuu facade_ref ylemmäs tai jonka yläpuolella on
-    ikkunanauha, muuten pisin pinta. Palauttaa (paikka,
-    julkisivukerrosten maski, sokkelin ero julkisivuun tai None, sokkelin yläreuna)."""
+    alapuolelta). Kerrokset jaetaan pinnoiksi alhaalta ylös (_surfaces). Alin pinta on sokkeli, jos se päättyy
+    viimeistään plinth_max ja on matala tai sen päällä on yhtä tiheä umpipinta (kivijalka). Julkisivu on
+    sokkelin yläpuolisista, alle plinth_max alkavista pinnoista se, jolla on eniten pisteitä alle 2 m
+    korkeudella (harva ikkunanauha ei voita). Palauttaa (paikka, julkisivukerrosten maski, sokkelin ero
+    julkisivuun tai None, sokkelin yläreuna)."""
     hz, off, sup = layers.T
     surfaces = _surfaces(layers, 1.5 * opt.facade_tol)
     if not surfaces:
         k = int(np.argmax(sup))
         return float(off[k]), np.arange(len(hz)) == k, None, None
-    # Alhaalta ylös: matala pinta (yläreuna enintään plinth_max) on sokkelia, jos sen yläpuolella on yhtä
-    # tiheä pinta (umpiseinä, esim. kivijalan päällä julkisivu). Selvästi harvempi yläpinta on ikkunanauha
-    # (lasista vähän paluita): silloin pinta on itse julkisivu.
-    plinth_gs = []
-    k = 0
-    while (k + 1 < len(surfaces) and hz[surfaces[k]].max() + 0.05 <= opt.plinth_max
-           and hz[surfaces[k]].min() < opt.plinth_max - 0.3
-           and np.median(sup[surfaces[k + 1]]) >= 0.6 * np.median(sup[surfaces[k]])):
-        plinth_gs.append(surfaces[k])
-        k += 1
-    plinth_g = np.concatenate(plinth_gs) if plinth_gs else None
-    if plinth_gs:
-        facade_g = surfaces[k]
+    # Sokkeli: alin pinta, joka päättyy viimeistään plinth_max ja on matala (enintään 0,6 m) tai jonka päällä
+    # on yhtä tiheä umpipinta (esim. 1,3 m kivijalka julkisivun alla). Selvästi harvempi yläpinta on
+    # ikkunanauha (lasista vähän paluita), jolloin alin pinta on itse julkisivu.
+    first = surfaces[0]
+    plinth_g = None
+    if (len(surfaces) >= 2 and hz[first].max() + 0.05 <= opt.plinth_max and hz[first].min() < opt.plinth_max - 0.3
+            and (np.ptp(hz[first]) + 0.1 <= 0.6
+                 or max(np.median(sup[g]) for g in surfaces[1:]) >= 0.6 * np.median(sup[first]))):
+        plinth_g = first
+    rest = surfaces[1:] if plinth_g is not None else surfaces
+    # Julkisivu: sokkelin yläpuolisista pinnoista, jotka alkavat alle plinth_max, se jolla on eniten pisteitä
+    # alle 2 m korkeudella (puuseinä ikkunanauhan alla voittaa harvan lasin; ikkunat eivät ole seinälinjaa)
+    low = [g for g in rest if hz[g].min() < opt.plinth_max]
+    if low:
+        facade_g = max(low, key=lambda g: float(sup[g][hz[g] < 2.0].sum()))
     else:
-        # Ei sokkelia: alin pinta, joka ulottuu sokkelin yläpuolelle (facade_ref) tai jonka yläpuolella on
-        # harvempi ikkunanauha, muuten pisin
-        reach = [g for j, g in enumerate(surfaces) if hz[g].max() >= opt.facade_ref or (
-            j + 1 < len(surfaces) and np.median(sup[surfaces[j + 1]]) < 0.6 * np.median(sup[g]))]
-        facade_g = reach[0] if reach else max(surfaces, key=len)
+        facade_g = rest[0]
     w = sup[facade_g]
     f = float(np.average(off[facade_g], weights=w))
     on = np.zeros(len(hz), bool)
     on[facade_g] = True
     plinth, plinth_top = None, None
-    if plinth_g is not None:
+    if plinth_g is not None and hz[plinth_g].max() < hz[facade_g].min():
         plinth = float(np.median(off[plinth_g])) - f
         plinth_top = float(hz[plinth_g].max() + 0.05)
     return f, on, plinth, plinth_top
@@ -908,10 +924,9 @@ def _drop_shadows(segs: list[Segment], opt: WallOptions) -> list[Segment]:
     haamu): enintään jog_max sivussa ja pituussuunnassa vähintään puoliksi pidemmän seinän kohdalla."""
     drop = set()
     for i, a in enumerate(segs):
-        if _joined(segs, i, 0, 0.02) and _joined(segs, i, 1, 0.02):
-            continue            # nurkista kiinni: ulokkeen kylki tai etupinta, ei varjo
         for j, b in enumerate(segs):
-            if i == j or b.length < a.length or j in drop:
+            # selvästi pidemmän seinän varjo (samanmittaiset rinnakkaiset palat ovat esim. ulokkeen kyljet)
+            if i == j or b.length < 1.5 * a.length or j in drop:
                 continue
             if abs(a.direction @ b.direction) < np.cos(np.radians(5)):
                 continue
@@ -1080,6 +1095,7 @@ def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segme
         segs = _drop_inside(segs, sample[height(sample) < 0.15, :2])
     if opt.refine and segs:
         wall_info(segs, pts, rel, index, opt)
+        segs = _drop_upper_duplicates(segs)
         # Pitkä seinä, jolta julkisivu löytyi, on varma suunnasta riippumatta (vinot korttelit)
         for s in segs:
             if s.length >= opt.sure_length and s.info.get("kohina") is not None:
@@ -1135,6 +1151,42 @@ def facade_check(xyz: np.ndarray, segments: list[Segment], opt: WallOptions | No
                 rows.append((sk, np.nan))
         out.append(np.array(rows).reshape(-1, 2))
     return out
+
+
+def _drop_upper_duplicates(segs: list[Segment], side: float = 0.35, angle_deg: float = 10.0) -> list[Segment]:
+    """Rinnakkaiset kaksoislinjat (enintään side sivussa, lyhyempi vähintään puoliksi toisen kohdalla) samasta
+    seinästä: ikkunanauha tai seinän yläosa julkisivun takana. Jäljelle jää linja, jonka julkisivu alkaa
+    alempaa (wall_info: korkeus), sitten linja lähempänä julkisivua (pinta), sitten pidempi. Nurkkien liitospalat (ilman tietoja) säilyvät."""
+    cos_lim = np.cos(np.radians(angle_deg))
+    drop = set()
+    order = sorted(range(len(segs)), key=lambda k: -segs[k].length)
+    for i in order:
+        a = segs[i]
+        if i in drop or not a.info.get("korkeus") or a.length < 0.5:
+            continue
+        for j in order:
+            b = segs[j]
+            if j == i or j in drop or not b.info.get("korkeus") or abs(a.direction @ b.direction) < cos_lim:
+                continue
+            short, long_ = (a, b) if a.length <= b.length else (b, a)
+            d, n = long_.direction, long_.normal
+            if abs(((short.p0 + short.p1) / 2 - long_.p0) @ n) > side:
+                continue
+            ss, sl = sorted([short.p0 @ d, short.p1 @ d]), sorted([long_.p0 @ d, long_.p1 @ d])
+            if min(ss[1], sl[1]) - max(ss[0], sl[0]) < 0.5 * short.length:
+                continue
+            ha, hb = a.info["korkeus"][0], b.info["korkeus"][0]
+            pa, pb = abs(a.info.get("pinta") or 0.0), abs(b.info.get("pinta") or 0.0)
+            if hb > ha + 0.3 or ha > hb + 0.3:
+                loser = j if hb > ha else i
+            elif abs(pa - pb) > 0.03:          # linja kauempana julkisivusta (esim. lasin tasossa)
+                loser = j if pb > pa else i
+            else:
+                loser = j if b is short else i
+            drop.add(loser)
+            if loser == i:
+                break
+    return [s for k, s in enumerate(segs) if k not in drop]
 
 
 def _band(xyz: np.ndarray, height, lo: float, hi: float, chunk: int = 5_000_000) -> np.ndarray:

@@ -167,6 +167,8 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
 
     def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
         polku = self.parameterAsFile(parameters, self.PILVI, context)
+        from qgis.core import QgsSettings
+        QgsSettings().setValue("maastomittaus/viimeisin_pilvi", polku)   # valikko täyttää seuraavalla kerralla
         try:
             rajat = ydin.lue_luokkarajat(self.parameterAsString(parameters, self.LUOKAT, context))
             luokat = ydin.poikkeamaluokat(rajat)
