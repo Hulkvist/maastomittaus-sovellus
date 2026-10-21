@@ -1,0 +1,293 @@
+"""Processing-työkalu: Seinälinjat pistepilvestä. Seinät tunnistetaan suoraan LAS/LAZ-pistepilvestä
+(seinat_pilvesta.py, sama laskenta kuin lidarscanin lidarpipessä ja CloudCompare-lisäosassa): linja
+julkisivuun sokkelin yläpuolelle, pienet ulokkeet yleistettynä, luokat SEINA / EPAVARMA / PAATELTY.
+Tulokset: seinälinjat tietoineen (sokkeli, korkeus, kohina), Seinät 3D väritettynä linjan ja pilven
+erolla, pistepilvi karttaan ja valinnainen DXF. Tuloksen voi verrata kantakarttaan tai mittaukseen
+työkalulla Vertaa seinälinjaa LiDARiin."""
+
+import os
+import time
+
+from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsFeatureSink,
+                       QgsGeometry, QgsPointXY, QgsProcessing, QgsProcessingAlgorithm, QgsProcessingException,
+                       QgsProcessingParameterBoolean, QgsProcessingParameterEnum, QgsProcessingParameterFeatureSink,
+                       QgsProcessingParameterFeatureSource, QgsProcessingParameterFile,
+                       QgsProcessingParameterFileDestination, QgsProcessingParameterString, QgsRectangle, Qgis)
+
+from . import ydin
+from .seinalinja_algoritmi import GK25, LUKU, SEINA3DKENTAT, TEKSTI, _cm, _kentat, lisaa_seinapalat
+from .tyylit import SEINAN_KORKEUS_M, aseta_tyylit
+from .vertailu_algoritmi import VARITYKSET, _gk25_alue, rajaa_pilvi
+
+import seinat_pilvesta as sp  # noqa: E402  (lib-kansiosta, ks. ydin.py)
+
+# Seinälinjojen kentät: taso = SEINA / EPAVARMA / PAATELTY (tyyli kuten LiDAR-seinissä), korkeus_ala/yla =
+# julkisivun korkeuskerrokset maasta, sokkeli_cm = sokkelin ero julkisivuun (+ = ulompana), pinta_cm =
+# julkisivun ero linjasta, kohina_cm = pinnan hajonta, kallistus_cm_m = pinnan siirtymä ylöspäin (+ = ulos)
+SEINAKENTAT = _kentat(("taso", TEKSTI), ("pituus_m", LUKU), ("seina", TEKSTI), ("korkeus_ala_m", LUKU),
+                      ("korkeus_yla_m", LUKU), ("sokkeli_cm", LUKU), ("sokkeli_yla_m", LUKU), ("pinta_cm", LUKU),
+                      ("kohina_cm", LUKU), ("kallistus_cm_m", LUKU))
+PROFIILIT = [("Automaattinen (LAS-otsikosta tai pistetiheydestä)", "auto"), ("iPhone", "iphone"),
+             ("Stonex (reppukeilain)", "stonex")]
+ALUEEN_PUSKURI_M = 5.0     # rajausalueen (talot) ympäriltä luetaan myös seinien ulkopuoli
+VAROITUS_KM2 = 0.25        # isompi alue: varoitus (aika ja muisti)
+
+
+class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
+    PILVI = "PILVI"
+    ALUE = "ALUE"
+    PROFIILI = "PROFIILI"
+    SISATILA = "SISATILA"
+    LUOKAT = "LUOKAT"
+    PISTEPILVI = "PISTEPILVI"
+    VARITYS = "VARITYS"
+    DXF = "DXF"
+    SEINAT = "SEINAT"
+    SEINAT_3D = "SEINAT_3D"
+
+    def createInstance(self):  # noqa: N802
+        return SeinatPilvestaAlgoritmi()
+
+    def name(self):
+        return "seinalinjat_pistepilvesta"
+
+    def displayName(self):  # noqa: N802
+        return "Seinälinjat pistepilvestä"
+
+    def shortHelpString(self):  # noqa: N802
+        return ("Tunnistaa rakennusten seinälinjat suoraan pistepilvestä (LAS tai LAZ): iPhonen keilaus "
+                "(lidarpipe) tai Stonexin reppukeilain. Laite päätellään LAS-otsikosta tai pistetiheydestä, "
+                "tai sen voi valita.\n\n"
+                "Rajaus: valitse talot kartalta (esim. kantakartta, 'Vain valitut kohteet') tai piirrä alue; "
+                "pistepilvestä luetaan alue ja 5 m ympäriltä (QGIS:n PDAL-työkalu pdal:clip). Ilman rajausta "
+                "luetaan koko pistepilvi (iso Stonexin pilvi: minuutteja ja gigatavuja muistia).\n\n"
+                "Seinäksi hyväksytään pystypinnat, joissa on pisteitä suurimmalla osalla korkeutta 0,3–2,5 m "
+                "maasta ja myös ylempänä (iPhone 1,8 m, Stonex 2,2 m): aidat, autot, kalusteet ja "
+                "kasvillisuus jäävät pois, eivätkä ikkunat katkaise seinää. Linja asetetaan julkisivuun "
+                "sokkelin yläpuolelle (julkisivu yli 1 m korkeudelta, 10 cm kerroksittain). Pienet ulokkeet ja "
+                "sisennykset (enintään 0,5 m syvät ja 2 m leveät) yleistetään pois. Ikkunoista näkyvät "
+                "sisäseinät jäävät pois.\n\n"
+                "Tulokset: Seinälinjat pistepilvestä (taso SEINA = varma, EPAVARMA = lyhyt tai vino, "
+                "PAATELTY = ääriviivan liitos ilman pisteitä; kentät sokkeli_cm = sokkelin ero julkisivuun, "
+                "+ = ulompana, korkeus_ala/yla_m = julkisivun korkeus maasta, kohina_cm, kallistus_cm_m), "
+                "Seinät 3D väritettynä linjan ja pistepilven seinäpinnan erolla (luokkarajat valittavissa) ja "
+                "pistepilvi karttaan. 3D-näkymä: Näytä -> 3D-karttanäkymät. Seinälinjat voi tallentaa DXF:ksi "
+                "(layerit SEINA, EPAVARMA, PAATELTY) ja verrata kantakarttaan tai mittaukseen työkalulla "
+                "Vertaa seinälinjaa LiDARiin.")
+
+    def initAlgorithm(self, config=None):  # noqa: N802
+        self.addParameter(QgsProcessingParameterFile(
+            self.PILVI, "Pistepilvi (LAS/LAZ)", behavior=QgsProcessingParameterFile.Behavior.File,
+            fileFilter="Pistepilvi (*.las *.laz *.LAS *.LAZ)"))
+        self.addParameter(QgsProcessingParameterFeatureSource(
+            self.ALUE, "Rajaus: talot tai alue (valinnainen, tyhjä = koko pistepilvi)",
+            [QgsProcessing.SourceType.TypeVectorAnyGeometry], optional=True))
+        self.addParameter(QgsProcessingParameterEnum(
+            self.PROFIILI, "Laite", options=[n for n, _ in PROFIILIT], defaultValue=0))
+        self.addParameter(QgsProcessingParameterBoolean(
+            self.SISATILA, "Sisätila (yksi lattiataso maanpinnan sijaan)", defaultValue=False))
+        self.addParameter(QgsProcessingParameterString(
+            self.LUOKAT, "Seinät 3D: poikkeaman luokkarajat (cm, välilyönnein, esim. 3 5 15)",
+            defaultValue=ydin.LUOKKARAJAT_OLETUS, optional=True))
+        self.addParameter(QgsProcessingParameterBoolean(
+            self.PISTEPILVI, "Lataa pistepilvi karttaan", defaultValue=True))
+        self.addParameter(QgsProcessingParameterEnum(
+            self.VARITYS, "Pistepilven väritys kartalla ja 3D-näkymässä", options=[n for n, _ in VARITYKSET],
+            defaultValue=0))
+        self.addParameter(QgsProcessingParameterFileDestination(
+            self.DXF, "Tallenna seinälinjat DXF:ksi (valinnainen)", fileFilter="DXF (*.dxf)", optional=True,
+            createByDefault=False))
+        self.addParameter(QgsProcessingParameterFeatureSink(
+            self.SEINAT, "Seinälinjat pistepilvestä", QgsProcessing.SourceType.TypeVectorLine))
+        self.addParameter(QgsProcessingParameterFeatureSink(
+            self.SEINAT_3D, "Seinät 3D", QgsProcessing.SourceType.TypeVectorPolygon, optional=True))
+
+    def _alue(self, parameters, context, feedback, polku, koord):
+        """Rajausalue ETRS-GK25:ssä (QgsGeometry): annetut kohteet puskuroituna, muuten pistepilven alue
+        otsikosta."""
+        lahde = self.parameterAsSource(parameters, self.ALUE, context)
+        if lahde is not None:
+            gk25 = QgsCoordinateReferenceSystem(GK25)
+            muunnos = None
+            if lahde.sourceCrs().isValid() and lahde.sourceCrs() != gk25:
+                muunnos = QgsCoordinateTransform(lahde.sourceCrs(), gk25, context.transformContext())
+            osat = []
+            for f in lahde.getFeatures():
+                g = QgsGeometry(f.geometry())
+                if g.isEmpty():
+                    continue
+                if muunnos is not None:
+                    g.transform(muunnos)
+                osat.append(g.buffer(ALUEEN_PUSKURI_M, 4))
+            if not osat:
+                raise QgsProcessingException("Rajaustasossa ei ole kohteita.")
+            feedback.pushInfo(f"Rajaus: {len(osat)} kohdetta ja {ALUEEN_PUSKURI_M:.0f} m ympäriltä.")
+            return QgsGeometry.unaryUnion(osat)
+        alue = _gk25_alue(ydin.las_alue(polku), koord, context)
+        if alue is None:
+            raise QgsProcessingException("Pistepilven aluetta ei saatu otsikosta.")
+        x0, y0, x1, y1 = alue
+        km2 = (x1 - x0) * (y1 - y0) / 1e6
+        if km2 > VAROITUS_KM2:
+            feedback.pushWarning(f"Koko pistepilvi luetaan ({km2:.2f} km²): tämä voi viedä minuutteja ja paljon "
+                                 "muistia. Rajaa tarvittaessa talot kartalta.")
+        return QgsGeometry.fromRect(QgsRectangle(x0 - 1, y0 - 1, x1 + 1, y1 + 1))
+
+    def _lue(self, polku, alue, koord, context, feedback):
+        """Pistepilvi alueelta: (paikalliset float32-koordinaatit n x 3, siirto (e0, n0, 0) ETRS-GK25:een)."""
+        feedback.pushInfo(f"Luetaan pistepilvi {os.path.basename(polku)} (pdal:clip)...")
+        rajaus = rajaa_pilvi(polku, alue, koord, "seinat_pistepilvi", context, feedback)
+        if rajaus is None:
+            return None, None
+        luettava, rajattu = rajaus
+        try:
+            xyz, origo = ydin.lue_las_paikallinen(luettava)
+        except Exception as e:
+            raise QgsProcessingException(f"Pistepilveä ei voitu lukea: {e}")
+        finally:
+            if rajattu:
+                try:
+                    os.remove(luettava)
+                except OSError:
+                    pass
+        origo[0] += koord["siirto_x"]
+        feedback.pushInfo(f"Pistepilvestä {len(xyz):,} pistettä.".replace(",", " "))
+        return xyz, origo
+
+    def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
+        polku = self.parameterAsFile(parameters, self.PILVI, context)
+        try:
+            rajat = ydin.lue_luokkarajat(self.parameterAsString(parameters, self.LUOKAT, context))
+            luokat = ydin.poikkeamaluokat(rajat)
+            koord = ydin.las_koordinaatisto(polku)
+        except (OSError, ValueError) as e:
+            raise QgsProcessingException(str(e))
+        if koord["epsg"] != ydin.GK25_EPSG and not QgsCoordinateReferenceSystem(f"EPSG:{koord['epsg']}").isValid():
+            raise QgsProcessingException(f"Pistepilven koordinaatisto EPSG:{koord['epsg']} ei ole QGIS:n tuntema.")
+        feedback.pushInfo(f"Pistepilven koordinaatisto: {koord['selitys']}.")
+        alue = self._alue(parameters, context, feedback, polku, koord)
+        xyz, origo = self._lue(polku, alue, koord, context, feedback)
+        if xyz is None or feedback.isCanceled():
+            return {}
+        if len(xyz) < 1000:
+            raise QgsProcessingException("Pistepilvessä ei ole pisteitä rajatulla alueella (eri alue?).")
+
+        profiili = PROFIILIT[self.parameterAsEnum(parameters, self.PROFIILI, context)][1]
+        if profiili == "auto":
+            otsikosta = sp.las_profile(polku)
+            profiili = otsikosta or sp.guess_profile(xyz)
+            feedback.pushInfo(f"Laite: {profiili} ({'LAS-otsikosta' if otsikosta else 'pistetiheydestä'}).")
+        opt = sp.WallOptions.for_cloud(xyz, profiili,
+                                       indoor=self.parameterAsBoolean(parameters, self.SISATILA, context))
+        feedback.pushInfo("Tunnistetaan seinät...")
+        alku = time.time()
+        segs = sp.extract_walls(xyz, opt)
+        if feedback.isCanceled():
+            return {}
+        feedback.pushInfo(f"{len(segs)} seinälinjaa, yhteensä {sum(s.length for s in segs):.1f} m "
+                          f"({time.time() - alku:.0f} s).")
+        if not segs:
+            feedback.pushWarning("Seiniä ei löytynyt. Onko alueella keilattuja seiniä (vähintään 2 m korkeita)?")
+        tarkistus = sp.facade_check(xyz, segs, opt)
+        feedback.pushInfo(_yhteenveto(segs, tarkistus))
+
+        crs = QgsCoordinateReferenceSystem(GK25)
+        e0, n0 = float(origo[0]), float(origo[1])
+        tulokset_id = {}
+        seinat, tulokset_id[self.SEINAT] = self.parameterAsSink(parameters, self.SEINAT, context, SEINAKENTAT,
+                                                                Qgis.WkbType.LineString, crs)
+        for k, s in enumerate(segs, start=1):
+            info = s.info or {}
+            korkeus = info.get("korkeus") or (None, None)
+            for a, b, mitattu, varma in sp.measured_pieces([s]):
+                taso = "PAATELTY" if not mitattu else "SEINA" if varma else "EPAVARMA"
+                f = QgsFeature(SEINAKENTAT)
+                f.setGeometry(QgsGeometry.fromPolylineXY([QgsPointXY(a[0] + e0, a[1] + n0),
+                                                          QgsPointXY(b[0] + e0, b[1] + n0)]))
+                f.setAttributes([taso, round(float(((b - a) ** 2).sum() ** 0.5), 3), f"Seinä {k}",
+                                 _m(korkeus[0]), _m(korkeus[1]), _cm(info.get("sokkeli")),
+                                 _m(info.get("sokkeli_yla")), _cm(info.get("pinta")), _cm(info.get("kohina")),
+                                 _cm(info.get("kallistus"))])
+                seinat.addFeature(f, QgsFeatureSink.Flag.FastInsert)
+
+        seinat3d, seinat3d_id = self.parameterAsSink(parameters, self.SEINAT_3D, context, SEINA3DKENTAT,
+                                                     Qgis.WkbType.Polygon, crs)
+        if seinat3d is not None and segs:
+            tulokset_id[self.SEINAT_3D] = seinat3d_id
+            for viiva, naytteet in _seinat_3d(segs, tarkistus, xyz, e0, n0):
+                lisaa_seinapalat(seinat3d, viiva, naytteet, luokat)
+
+        dxf_polku = self.parameterAsFileOutput(parameters, self.DXF, context)
+        if dxf_polku and segs:
+            sp.write_dxf_r12(dxf_polku, _dxf_viivat(segs, xyz, e0, n0))
+            feedback.pushInfo(f"DXF: {dxf_polku}")
+            tulokset_id[self.DXF] = dxf_polku
+
+        pistepilvi = None
+        if self.parameterAsBoolean(parameters, self.PISTEPILVI, context):
+            import numpy as np
+            korkeudet = tuple(float(z) for z in np.percentile(xyz[::max(1, len(xyz) // 1_000_000), 2], [1, 99]))
+            varitys = VARITYKSET[self.parameterAsEnum(parameters, self.VARITYS, context)][1]
+            pistepilvi = (polku, f"Pistepilvi ({os.path.basename(polku)})", korkeudet, None, varitys)
+            feedback.pushInfo("Pistepilvi lisätään karttaan ajon jälkeen (iso LAZ: indeksointi kestää hetken). "
+                              "3D-näkymä: Näytä -> 3D-karttanäkymät.")
+        aseta_tyylit(context, [(tulokset_id.get(self.SEINAT), "pilven_seinat"),
+                               (tulokset_id.get(self.SEINAT_3D), "seinat_3d")], pistepilvi, luokat)
+        return tulokset_id
+
+
+def _m(arvo):
+    return None if arvo is None else round(float(arvo), 2)
+
+
+def _maanpinta(xyz, p, sade_m=1.5):
+    """Maanpinnan korkeus pisteen p (paikallinen) ympäriltä: alimpien pisteiden 2. persentiili."""
+    import numpy as np
+    lahella = xyz[(np.abs(xyz[:, 0] - p[0]) < sade_m) & (np.abs(xyz[:, 1] - p[1]) < sade_m), 2]
+    return float(np.percentile(lahella, 2)) if len(lahella) >= 8 else None
+
+
+def _seinat_3d(segs, tarkistus, xyz, e0, n0):
+    """Seinät 3D -palat: [(viiva ydin.viivat_pisteista-muodossa, naytteet [(e, n, ero_m)])]. Ero on
+    julkisivun (sokkelin yläpuolelta) etumerkillinen etäisyys linjasta (+ = ulompana) 25 cm välein
+    (seinat_pilvesta.facade_check); seinä alkaa maanpinnasta."""
+    import numpy as np
+    tulos = []
+    for k, (s, rivit) in enumerate(zip(segs, tarkistus), start=1):
+        maa = _maanpinta(xyz, (s.p0 + s.p1) / 2)
+        z = None if maa is None else maa + SEINAN_KORKEUS_M / 2
+        viiva = ydin.viivat_pisteista([(f"Seinä {k}", [(s.p0[0] + e0, s.p0[1] + n0, z),
+                                                       (s.p1[0] + e0, s.p1[1] + n0, z)])])["viivat"][0]
+        naytteet = [(float(s.p0[0] + s.direction[0] * t + e0), float(s.p0[1] + s.direction[1] * t + n0),
+                     None if np.isnan(o) else float(o)) for t, o in rivit]
+        tulos.append((viiva, naytteet or None))
+    return tulos
+
+
+def _yhteenveto(segs, tarkistus):
+    """Julkisivun ero linjoista yhdellä rivillä (pituuksilla painotettu)."""
+    import numpy as np
+    rivit = [(s.length, np.nanmean(np.abs(r[:, 1])), np.mean(np.abs(r[:, 1][~np.isnan(r[:, 1])]) <= 0.03))
+             for s, r in zip(segs, tarkistus) if len(r) and (~np.isnan(r[:, 1])).sum() >= 2]
+    if not rivit:
+        return "Julkisivua ei löytynyt linjojen kohdalta."
+    w, ero, osuus = map(np.array, zip(*rivit))
+    return (f"Julkisivu keskimäärin {np.average(ero, weights=w) * 100:.1f} cm linjasta; alle 3 cm "
+            f"{np.average(osuus, weights=w) * 100:.0f} % pituudesta ({len(rivit)} linjaa).")
+
+
+def _dxf_viivat(segs, xyz, e0, n0):
+    """DXF:n murtoviivat [(layer, [(x, y, z)], suljettu)] kuten lidarpipen DXF: mitatut osat SEINA /
+    EPAVARMA, päätellyt PAATELTY; z = maanpinta + 1 m (julkisivun korkeus noin)."""
+    import numpy as np
+    maa = _maanpinta(xyz, np.mean([(s.p0 + s.p1) / 2 for s in segs], axis=0), sade_m=1e9) or 0.0
+    palat = sp.measured_pieces(segs)
+    out = []
+    for taso, ryhma in (("SEINA", [p for p in palat if p[2] and p[3]]),
+                        ("EPAVARMA", [p for p in palat if p[2] and not p[3]]),
+                        ("PAATELTY", [p for p in palat if not p[2]])):
+        for ketju in sp.chains(sp._pieces_as_segments(ryhma)):
+            suljettu = len(ketju) > 3 and np.linalg.norm(ketju[0] - ketju[-1]) < 0.002
+            pts = [(float(p[0] + e0), float(p[1] + n0), maa + 1.0) for p in (ketju[:-1] if suljettu else ketju)]
+            out.append((taso, pts, suljettu))
+    return out

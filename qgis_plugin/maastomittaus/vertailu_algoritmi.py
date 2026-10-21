@@ -84,6 +84,40 @@ def _rajausalue(alue, koord, nimi, context):
     return polku
 
 
+def rajaa_pilvi(polku, alue, koord, nimi, context, feedback):
+    """Pistepilvi (LAS/LAZ/COPC) rajattuna alueelle (QgsGeometry, ETRS-GK25) pakkaamattomaksi LAS:ksi
+    QGIS:n pdal:clip-työkalulla, muunnettuna ETRS-GK25:een (pdal:reproject), jos otsikossa on muu
+    koordinaatisto (koord = ydin.las_koordinaatisto). Palauttaa (luettava polku, onko tilapäinen) tai
+    None, jos käyttäjä perui. Jos PDAL puuttuu, pakkaamaton LAS luetaan kokonaan."""
+    import processing
+
+    muunnettava = koord["epsg"] != ydin.GK25_EPSG
+    rajaus = _rajausalue(alue, koord, f"{nimi}_alue.geojson", context)
+    rajattu = QgsProcessingUtils.generateTempFilename(f"{nimi}.las", context)
+    try:
+        processing.run("pdal:clip", {"INPUT": polku, "OVERLAY": rajaus, "OUTPUT": rajattu},
+                       context=context, feedback=feedback, is_child_algorithm=True)
+        if not os.path.isfile(rajattu):
+            raise RuntimeError("rajattua pistepilveä ei syntynyt")
+        if muunnettava:
+            muunnettu = QgsProcessingUtils.generateTempFilename(f"{nimi}_gk25.las", context)
+            feedback.pushInfo(f"Muunnetaan rajattu pistepilvi EPSG:{koord['epsg']} -> EPSG:3879 "
+                              "(pdal:reproject)...")
+            processing.run("pdal:reproject", {"INPUT": rajattu, "CRS": GK25, "OUTPUT": muunnettu},
+                           context=context, feedback=feedback, is_child_algorithm=True)
+            os.remove(rajattu)
+            rajattu = muunnettu
+        return rajattu, True
+    except Exception as e:
+        if feedback.isCanceled():
+            return None
+        if not muunnettava and not polku.lower().endswith((".laz", ".copc")):
+            feedback.pushWarning(f"Pistepilven rajaus ei onnistunut ({e}); luetaan koko LAS.")
+            return polku, False
+        raise QgsProcessingException(f"Pistepilveä ei voitu rajata ({e}). LAZ-tiedoston lukuun "
+                                     "tarvitaan QGIS:n PDAL-työkalut (QGIS 3.32 tai uudempi).")
+
+
 class VertaaSeinalinjaAlgoritmi(QgsProcessingAlgorithm):
     SEINALINJA = "SEINALINJA"
     NIMIKENTTA = "NIMIKENTTA"
@@ -483,39 +517,15 @@ class VertaaSeinalinjaAlgoritmi(QgsProcessingAlgorithm):
         pakkaamattomaksi LAS:ksi, joten LAZ/COPC käy; jos PDAL puuttuu, pakkaamaton LAS luetaan
         kokonaan. Rajausalue annetaan pistepilven omina lukuina ja otsikon koordinaatistossa, joten
         rajaus osuu, muuntaako PDAL rajausalueen tai ei."""
-        import processing
-
         kaista = QgsGeometry.unaryUnion([
             QgsGeometry.fromPolylineXY([QgsPointXY(e, n) for e, n, _ in pisteet]).buffer(PILVEN_RAJAUS_M, 4)
             for _, pisteet in viivat if len(pisteet) > 1])
-        muunnettava = koord["epsg"] != ydin.GK25_EPSG
-        rajaus = _rajausalue(kaista, koord, "seinalinjan_kaista.geojson", context)
-        rajattu = QgsProcessingUtils.generateTempFilename("seinalinjan_pistepilvi.las", context)
         feedback.pushInfo(f"Luetaan pistepilvi {os.path.basename(polku)} seinälinjan ympäriltä "
                           f"({PILVEN_RAJAUS_M} m, pdal:clip)...")
-        luettava = rajattu
-        try:
-            processing.run("pdal:clip", {"INPUT": polku, "OVERLAY": rajaus, "OUTPUT": rajattu},
-                           context=context, feedback=feedback, is_child_algorithm=True)
-            if not os.path.isfile(rajattu):
-                raise RuntimeError("rajattua pistepilveä ei syntynyt")
-            if muunnettava:
-                muunnettu = QgsProcessingUtils.generateTempFilename("seinalinjan_pistepilvi_gk25.las", context)
-                feedback.pushInfo(f"Muunnetaan rajattu pistepilvi EPSG:{koord['epsg']} -> EPSG:3879 "
-                                  "(pdal:reproject)...")
-                processing.run("pdal:reproject", {"INPUT": rajattu, "CRS": GK25, "OUTPUT": muunnettu},
-                               context=context, feedback=feedback, is_child_algorithm=True)
-                os.remove(rajattu)
-                rajattu = luettava = muunnettu
-        except Exception as e:
-            if feedback.isCanceled():
-                return None
-            if not muunnettava and not polku.lower().endswith((".laz", ".copc")):
-                feedback.pushWarning(f"Pistepilven rajaus ei onnistunut ({e}); luetaan koko LAS.")
-                luettava = polku
-            else:
-                raise QgsProcessingException(f"Pistepilveä ei voitu rajata ({e}). LAZ-tiedoston lukuun "
-                                             "tarvitaan QGIS:n PDAL-työkalut (QGIS 3.32 tai uudempi).")
+        rajaus = rajaa_pilvi(polku, kaista, koord, "seinalinjan_pistepilvi", context, feedback)
+        if rajaus is None:
+            return None
+        luettava, rajattu = rajaus
         try:
             xyz = ydin.lue_las_xyz(luettava)
             if koord["siirto_x"]:
@@ -523,9 +533,9 @@ class VertaaSeinalinjaAlgoritmi(QgsProcessingAlgorithm):
         except Exception as e:
             raise QgsProcessingException(f"Pistepilveä ei voitu lukea: {e}")
         finally:
-            if luettava == rajattu:
+            if rajattu:
                 try:
-                    os.remove(rajattu)   # pakkaamaton rajaus on iso (satoja megatavuja)
+                    os.remove(luettava)   # pakkaamaton rajaus on iso (satoja megatavuja)
                 except OSError:
                     pass
         feedback.pushInfo(f"Pistepilvestä {len(xyz):,} pistettä seinälinjan ympäriltä.".replace(",", " "))
