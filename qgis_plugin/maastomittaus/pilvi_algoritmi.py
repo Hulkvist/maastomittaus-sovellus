@@ -10,7 +10,8 @@ import time
 
 from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsFeatureSink,
                        QgsGeometry, QgsPointXY, QgsProcessing, QgsProcessingAlgorithm, QgsProcessingException,
-                       QgsProcessingParameterBoolean, QgsProcessingParameterEnum, QgsProcessingParameterFeatureSink,
+                       QgsProcessingParameterBoolean, QgsProcessingParameterEnum, QgsProcessingParameterExtent,
+                       QgsProcessingParameterFeatureSink,
                        QgsProcessingParameterFeatureSource, QgsProcessingParameterFile,
                        QgsProcessingParameterFileDestination, QgsProcessingParameterString, QgsRectangle, Qgis)
 
@@ -36,6 +37,7 @@ VAROITUS_KM2 = 0.25        # isompi alue: varoitus (aika ja muisti)
 class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
     PILVI = "PILVI"
     ALUE = "ALUE"
+    LAAJUUS = "LAAJUUS"
     PROFIILI = "PROFIILI"
     SISATILA = "SISATILA"
     LUOKAT = "LUOKAT"
@@ -58,8 +60,10 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
         return ("Tunnistaa rakennusten seinälinjat suoraan pistepilvestä (LAS tai LAZ): iPhonen keilaus "
                 "(lidarpipe) tai Stonexin reppukeilain. Laite päätellään LAS-otsikosta tai pistetiheydestä, "
                 "tai sen voi valita.\n\n"
-                "Rajaus: valitse talot kartalta (esim. kantakartta, 'Vain valitut kohteet') tai piirrä alue; "
-                "pistepilvestä luetaan alue ja 5 m ympäriltä (QGIS:n PDAL-työkalu pdal:clip). Ilman rajausta "
+                "Rajaus: valitse talot kartalta (esim. kantakartta, 'Vain valitut kohteet'; pistepilvestä luetaan "
+                "talot ja 5 m ympäriltä) tai piirrä alue: kentän 'alue kartalta' valikosta Piirrä kartalle ja "
+                "vedä suorakaide (myös kartan näkymä tai tason laajuus käy). Rajaus QGIS:n PDAL-työkalulla "
+                "pdal:clip. Valitut talot menevät piirretyn alueen edelle. Ilman rajausta "
                 "luetaan koko pistepilvi (iso Stonexin pilvi: minuutteja ja gigatavuja muistia).\n\n"
                 "Seinäksi hyväksytään pystypinnat, joissa on pisteitä suurimmalla osalla korkeutta 0,3–2,5 m "
                 "maasta ja myös ylempänä (iPhone 1,8 m, Stonex 2,2 m): aidat, autot, kalusteet ja "
@@ -82,6 +86,8 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterFeatureSource(
             self.ALUE, "Rajaus: talot tai alue (valinnainen, tyhjä = koko pistepilvi)",
             [QgsProcessing.SourceType.TypeVectorAnyGeometry], optional=True))
+        self.addParameter(QgsProcessingParameterExtent(
+            self.LAAJUUS, "Rajaus: alue kartalta (valinnainen; kentän valikosta 'Piirrä kartalle')", optional=True))
         self.addParameter(QgsProcessingParameterEnum(
             self.PROFIILI, "Laite", options=[n for n, _ in PROFIILIT], defaultValue=0))
         self.addParameter(QgsProcessingParameterBoolean(
@@ -123,6 +129,11 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
                 raise QgsProcessingException("Rajaustasossa ei ole kohteita.")
             feedback.pushInfo(f"Rajaus: {len(osat)} kohdetta ja {ALUEEN_PUSKURI_M:.0f} m ympäriltä.")
             return QgsGeometry.unaryUnion(osat)
+        if parameters.get(self.LAAJUUS) not in (None, ""):
+            r = self.parameterAsExtent(parameters, self.LAAJUUS, context, QgsCoordinateReferenceSystem(GK25))
+            if not r.isNull() and r.width() > 0 and r.height() > 0:
+                feedback.pushInfo(f"Rajaus: piirretty alue {r.width():.0f} x {r.height():.0f} m.")
+                return QgsGeometry.fromRect(r)
         alue = _gk25_alue(ydin.las_alue(polku), koord, context)
         if alue is None:
             raise QgsProcessingException("Pistepilven aluetta ei saatu otsikosta.")
@@ -179,7 +190,8 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
             feedback.pushInfo(f"Laite: {profiili} ({'LAS-otsikosta' if otsikosta else 'pistetiheydestä'}).")
         opt = sp.WallOptions.for_cloud(xyz, profiili,
                                        indoor=self.parameterAsBoolean(parameters, self.SISATILA, context))
-        feedback.pushInfo("Tunnistetaan seinät...")
+        feedback.setProgress(10)
+        feedback.pushInfo("Tunnistetaan seinät (iso pilvi: muutama minuutti)...")
         alku = time.time()
         segs = sp.extract_walls(xyz, opt)
         if feedback.isCanceled():
@@ -188,8 +200,16 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
                           f"({time.time() - alku:.0f} s).")
         if not segs:
             feedback.pushWarning("Seiniä ei löytynyt. Onko alueella keilattuja seiniä (vähintään 2 m korkeita)?")
+        feedback.setProgress(60)
+        feedback.pushInfo("Tarkistetaan julkisivu linjojen kohdalta 25 cm välein...")
+        alku = time.time()
         tarkistus = sp.facade_check(xyz, segs, opt)
-        feedback.pushInfo(_yhteenveto(segs, tarkistus))
+        feedback.pushInfo(_yhteenveto(segs, tarkistus) + f" ({time.time() - alku:.0f} s)")
+        if feedback.isCanceled():
+            return {}
+        feedback.setProgress(80)
+        # Maanpinta Seinät 3D:tä ja DXF:ää varten otoksesta (koko pilven läpikäynti seinittäin olisi hidas)
+        maa = sp.Ground(xyz[::max(1, len(xyz) // 3_000_000)], opt.ground_cell)
 
         crs = QgsCoordinateReferenceSystem(GK25)
         e0, n0 = float(origo[0]), float(origo[1])
@@ -214,12 +234,13 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
                                                      Qgis.WkbType.Polygon, crs)
         if seinat3d is not None and segs:
             tulokset_id[self.SEINAT_3D] = seinat3d_id
-            for viiva, naytteet in _seinat_3d(segs, tarkistus, xyz, e0, n0):
+            feedback.pushInfo("Tehdään tasot (Seinät 3D)...")
+            for viiva, naytteet in _seinat_3d(segs, tarkistus, maa, e0, n0):
                 lisaa_seinapalat(seinat3d, viiva, naytteet, luokat)
 
         dxf_polku = self.parameterAsFileOutput(parameters, self.DXF, context)
         if dxf_polku and segs:
-            sp.write_dxf_r12(dxf_polku, _dxf_viivat(segs, xyz, e0, n0))
+            sp.write_dxf_r12(dxf_polku, _dxf_viivat(segs, maa, e0, n0))
             feedback.pushInfo(f"DXF: {dxf_polku}")
             tulokset_id[self.DXF] = dxf_polku
 
@@ -240,22 +261,20 @@ def _m(arvo):
     return None if arvo is None else round(float(arvo), 2)
 
 
-def _maanpinta(xyz, p, sade_m=1.5):
-    """Maanpinnan korkeus pisteen p (paikallinen) ympäriltä: alimpien pisteiden 2. persentiili."""
+def _maanpinta(maa, p):
+    """Maanpinnan korkeus paikallisessa pisteessä p (seinat_pilvesta.Ground)."""
     import numpy as np
-    lahella = xyz[(np.abs(xyz[:, 0] - p[0]) < sade_m) & (np.abs(xyz[:, 1] - p[1]) < sade_m), 2]
-    return float(np.percentile(lahella, 2)) if len(lahella) >= 8 else None
+    return float(maa.at(np.asarray(p, dtype=float)[None, :2])[0])
 
 
-def _seinat_3d(segs, tarkistus, xyz, e0, n0):
+def _seinat_3d(segs, tarkistus, maa, e0, n0):
     """Seinät 3D -palat: [(viiva ydin.viivat_pisteista-muodossa, naytteet [(e, n, ero_m)])]. Ero on
     julkisivun (sokkelin yläpuolelta) etumerkillinen etäisyys linjasta (+ = ulompana) 25 cm välein
     (seinat_pilvesta.facade_check); seinä alkaa maanpinnasta."""
     import numpy as np
     tulos = []
     for k, (s, rivit) in enumerate(zip(segs, tarkistus), start=1):
-        maa = _maanpinta(xyz, (s.p0 + s.p1) / 2)
-        z = None if maa is None else maa + SEINAN_KORKEUS_M / 2
+        z = _maanpinta(maa, (s.p0 + s.p1) / 2) + SEINAN_KORKEUS_M / 2
         viiva = ydin.viivat_pisteista([(f"Seinä {k}", [(s.p0[0] + e0, s.p0[1] + n0, z),
                                                        (s.p1[0] + e0, s.p1[1] + n0, z)])])["viivat"][0]
         naytteet = [(float(s.p0[0] + s.direction[0] * t + e0), float(s.p0[1] + s.direction[1] * t + n0),
@@ -276,11 +295,10 @@ def _yhteenveto(segs, tarkistus):
             f"{np.average(osuus, weights=w) * 100:.0f} % pituudesta ({len(rivit)} linjaa).")
 
 
-def _dxf_viivat(segs, xyz, e0, n0):
+def _dxf_viivat(segs, maa, e0, n0):
     """DXF:n murtoviivat [(layer, [(x, y, z)], suljettu)] kuten lidarpipen DXF: mitatut osat SEINA /
-    EPAVARMA, päätellyt PAATELTY; z = maanpinta + 1 m (julkisivun korkeus noin)."""
+    EPAVARMA, päätellyt PAATELTY; z = maanpinta kärjen kohdalla + 1 m (julkisivun korkeus noin)."""
     import numpy as np
-    maa = _maanpinta(xyz, np.mean([(s.p0 + s.p1) / 2 for s in segs], axis=0), sade_m=1e9) or 0.0
     palat = sp.measured_pieces(segs)
     out = []
     for taso, ryhma in (("SEINA", [p for p in palat if p[2] and p[3]]),
@@ -288,6 +306,7 @@ def _dxf_viivat(segs, xyz, e0, n0):
                         ("PAATELTY", [p for p in palat if not p[2]])):
         for ketju in sp.chains(sp._pieces_as_segments(ryhma)):
             suljettu = len(ketju) > 3 and np.linalg.norm(ketju[0] - ketju[-1]) < 0.002
-            pts = [(float(p[0] + e0), float(p[1] + n0), maa + 1.0) for p in (ketju[:-1] if suljettu else ketju)]
+            pts = [(float(p[0] + e0), float(p[1] + n0), _maanpinta(maa, p) + 1.0)
+                   for p in (ketju[:-1] if suljettu else ketju)]
             out.append((taso, pts, suljettu))
     return out

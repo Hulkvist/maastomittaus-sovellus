@@ -66,7 +66,8 @@ class WallOptions:
     search: float = 0.25         # seinäpinnan haku suoran molemmin puolin [m]
     facade_min: float = 0.1      # korkeusprofiili maasta [m]
     facade_max: float = 3.0
-    facade_ref: float = 1.0      # julkisivu määritetään tätä ylempää (sokkelin yläpuolelta) [m]
+    facade_ref: float = 1.0      # ilman sokkelia julkisivu on alin pinta, joka ulottuu tätä ylemmäs [m]
+    plinth_max: float = 1.6      # sokkeli (esim. kivijalka) päättyy viimeistään tähän [m]
     facade_tol: float = 0.015    # saman pinnan kerrosten suurin ero [m]
     # Kartoitusyleistys: enintään general_depth syvät ja general_width leveät ulokkeet/sisennykset pois
     sure_length: float = 2.0     # tätä pidempi julkisivullinen seinä on SEINA, vaikka se on vino pääsuuntaan
@@ -382,29 +383,59 @@ def _facade_layers(t: np.ndarray, h: np.ndarray, opt: WallOptions, min_pts: int 
     return np.array(rows).reshape(-1, 3)
 
 
-def _facade(layers: np.ndarray, opt: WallOptions):
-    """Julkisivun paikka kerroksista: tuella painotettu mediaani facade_ref ylemmistä kerroksista (tai
-    kaikista, jos ylhäältä ei ole pisteitä), sen kerrokset (±facade_tol) ja sokkeli = julkisivun alapuolinen
-    yhtenäinen kerrosjakso, joka poikkeaa siitä. Palauttaa (paikka, julkisivukerrosten maski, sokkeli tai None,
-    sokkelin yläreuna)."""
-    def wmedian(v, w):
-        o = np.argsort(v)
-        c = np.cumsum(w[o])
-        return float(v[o][np.searchsorted(c, 0.5 * c[-1])])
+def _surfaces(layers: np.ndarray, tol: float) -> list[np.ndarray]:
+    """Korkeuskerrokset (alhaalta ylös) pinnoiksi: uusi pinta alkaa, kun kerroksen paikka poikkeaa nykyisen
+    pinnan mediaanista yli tol. Yhden kerroksen välikappaleet (kohina, ikkunalauta) liitetään pois.
+    Palauttaa pinnat kerrosindeksien taulukkoina."""
+    groups: list[list[int]] = []
+    for k, o in enumerate(layers[:, 1]):
+        if groups and abs(o - np.median(layers[groups[-1], 1])) <= tol:
+            groups[-1].append(k)
+        else:
+            groups.append([k])
+    return [np.array(g) for g in groups if len(g) >= 2]
 
+
+def _facade(layers: np.ndarray, opt: WallOptions):
+    """Julkisivun paikka korkeuskerroksista (kartoituskäytäntö: sokkelin yläpuolelta ja ikkunanauhan
+    alapuolelta). Kerrokset jaetaan pinnoiksi alhaalta ylös (_surfaces). Matalat pinnat (yläreuna enintään
+    plinth_max), joiden yläpuolella on yhtä tiheä pinta, ovat sokkelia (myös 1,3 m kivijalka); julkisivu on
+    ensimmäinen pinta sokkelin yläpuolella (ylempänä oleva harvempi ikkunanauha tai ulkoneva yläosa ei siirrä
+    linjaa). Ilman sokkelia julkisivu on alin pinta, joka ulottuu facade_ref ylemmäs tai jonka yläpuolella on
+    ikkunanauha, muuten pisin pinta. Palauttaa (paikka,
+    julkisivukerrosten maski, sokkelin ero julkisivuun tai None, sokkelin yläreuna)."""
     hz, off, sup = layers.T
-    upper = hz >= opt.facade_ref
-    if upper.sum() < 2:
-        upper = np.ones(len(hz), bool)
-    f = wmedian(off[upper], sup[upper])
-    on = np.abs(off - f) <= opt.facade_tol
+    surfaces = _surfaces(layers, 1.5 * opt.facade_tol)
+    if not surfaces:
+        k = int(np.argmax(sup))
+        return float(off[k]), np.arange(len(hz)) == k, None, None
+    # Alhaalta ylös: matala pinta (yläreuna enintään plinth_max) on sokkelia, jos sen yläpuolella on yhtä
+    # tiheä pinta (umpiseinä, esim. kivijalan päällä julkisivu). Selvästi harvempi yläpinta on ikkunanauha
+    # (lasista vähän paluita): silloin pinta on itse julkisivu.
+    plinth_gs = []
+    k = 0
+    while (k + 1 < len(surfaces) and hz[surfaces[k]].max() + 0.05 <= opt.plinth_max
+           and hz[surfaces[k]].min() < opt.plinth_max - 0.3
+           and np.median(sup[surfaces[k + 1]]) >= 0.6 * np.median(sup[surfaces[k]])):
+        plinth_gs.append(surfaces[k])
+        k += 1
+    plinth_g = np.concatenate(plinth_gs) if plinth_gs else None
+    if plinth_gs:
+        facade_g = surfaces[k]
+    else:
+        # Ei sokkelia: alin pinta, joka ulottuu sokkelin yläpuolelle (facade_ref) tai jonka yläpuolella on
+        # harvempi ikkunanauha, muuten pisin
+        reach = [g for j, g in enumerate(surfaces) if hz[g].max() >= opt.facade_ref or (
+            j + 1 < len(surfaces) and np.median(sup[surfaces[j + 1]]) < 0.6 * np.median(sup[g]))]
+        facade_g = reach[0] if reach else max(surfaces, key=len)
+    w = sup[facade_g]
+    f = float(np.average(off[facade_g], weights=w))
+    on = np.zeros(len(hz), bool)
+    on[facade_g] = True
     plinth, plinth_top = None, None
-    if on.any():
-        lowest = hz[on].min()
-        below = (hz < lowest) & ~on & (np.abs(off - f) <= opt.search)
-        if below.sum() >= 2:
-            plinth = float(np.median(off[below])) - f
-            plinth_top = float(hz[below].max() + 0.05)
+    if plinth_g is not None:
+        plinth = float(np.median(off[plinth_g])) - f
+        plinth_top = float(hz[plinth_g].max() + 0.05)
     return f, on, plinth, plinth_top
 
 
@@ -1090,11 +1121,13 @@ def facade_check(xyz: np.ndarray, segments: list[Segment], opt: WallOptions | No
     for seg, n in zip(segments, normals):
         sign = 1.0 if seg.normal @ n >= 0 else -1.0
         _, sv, tv, hv = _near_points(seg, pts, rel, index, opt, pad=0.0)
+        order = np.argsort(sv)             # kohdan ikkuna lajitellusta (nopea pitkälläkin seinällä)
+        sv, tv, hv = sv[order], tv[order], hv[order]
         k = max(1, int(round(seg.length / step)))
         rows = []
         for sk in (np.arange(k) + 0.5) * seg.length / k:
-            sel = np.abs(sv - sk) <= side
-            layers = _facade_layers(tv[sel], hv[sel], opt, min_pts=8) if sel.sum() >= 30 else np.zeros((0, 3))
+            a, b = np.searchsorted(sv, sk - side), np.searchsorted(sv, sk + side, side="right")
+            layers = _facade_layers(tv[a:b], hv[a:b], opt, min_pts=8) if b - a >= 30 else np.zeros((0, 3))
             if len(layers) >= 3:
                 f, on, _, _ = _facade(layers, opt)
                 rows.append((sk, f * sign if on.sum() >= 2 else np.nan))
