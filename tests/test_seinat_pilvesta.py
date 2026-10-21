@@ -102,3 +102,19 @@ def test_profile_from_density_and_header(tmp_path):
         p = tmp_path / "x.las"
         p.write_bytes(b"LASF" + bytes(22) + system.ljust(32, b"\0") + software.ljust(32, b"\0") + bytes(300))
         assert las_profile(p) == expected
+
+
+def test_line_below_window_band():
+    """Osuuskunnan seinä: sokkeli 0–0,4 m (4 cm ulompana), puuseinä 0,4–1,1 m ja koko seinän mittainen
+    ikkunanauha 1,1–2,5 m (lasi 14 cm sisempänä). Linja puuseinään sokkelin yläpuolelle, ikkunoiden alle."""
+    rng = np.random.default_rng(6)
+    south = [_surface(rng, (0, 0), (12, 0), 0, 0.4, offset=-0.04), _surface(rng, (0, 0), (12, 0), 0.4, 1.1),
+             _surface(rng, (0, 0), (12, 0), 1.1, 2.5, offset=0.14, density=1500)]
+    segs = extract_walls(_house(rng, south), WallOptions())
+    [wall] = [s for s in _south(segs) if s.length > 5]
+    assert abs(wall.p0[1]) < 0.01 and abs(wall.p1[1]) < 0.01, (wall.p0, wall.p1)
+    assert abs(wall.info["sokkeli"] - 0.04) < 0.01 and wall.info["korkeus"][1] < 1.2
+    # sama ilman sokkelia: alin pinta on julkisivu, harvempi ikkunanauha ei ole sen yläpuolinen seinä
+    south = [_surface(rng, (0, 0), (12, 0), 0, 1.1), _surface(rng, (0, 0), (12, 0), 1.1, 2.5, offset=0.14, density=1500)]
+    [wall] = [s for s in _south(extract_walls(_house(rng, south), WallOptions())) if s.length > 5]
+    assert abs(wall.p0[1]) < 0.01 and wall.info["sokkeli"] is None
