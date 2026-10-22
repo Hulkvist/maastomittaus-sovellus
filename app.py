@@ -1036,8 +1036,8 @@ if ladattu_tiedosto is not None and raportti:
         st.caption("Tallennus vie kantaan pisteet, mittausraportin (yhteenveto ja PDF) ja asemapisteet"
                    + (" sekä yllä näkyvän seinälinjan (valittu järjestys, kantakartta- ja LiDAR-valinnat)"
                       if sl_tallennettava else "")
-                   + ". Saman kiinteistön ja tiedoston aiempi raportti" + (" ja seinälinja" if sl_tallennettava else "")
-                   + " korvataan.")
+                   + ". Saman kiinteistön ja tiedoston aiemmat pisteet, raportti ja asemat"
+                   + (" sekä seinälinja" if sl_tallennettava else "") + " korvataan.")
         if st.button("Tallenna mittaukset kantaan"):
             jobxml_tunnus_lopullinen = jobxml_tunnus_syote
 
