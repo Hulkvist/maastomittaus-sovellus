@@ -57,12 +57,15 @@ function luoPiirto(L, tila) {
   ohjain.onAdd = () => {
     const div = L.DomUtil.create("div", "slm-piirto");
     div.innerHTML = '<button data-t="aloita">✏ Uusi viiva</button>'
+      + '<button data-t="jatka" title="Jatka avoimen viivan päätä lähimpään viivaan">⇥ Jatka</button>'
+      + '<button data-t="yhdista" title="Yhdistä kaksi avointa viivaa leikkauspisteessä">✕ Yhdistä</button>'
       + '<button data-t="valmis" style="display:none">Valmis</button>'
       + '<button data-t="peruuta" style="display:none">Peruuta</button>'
-      + '<div class="slm-ohje" style="display:none">Klikkaa pisteitä järjestyksessä (napsahtaa pisteeseen). '
-      + 'Tuplaklikkaus tai Valmis lopettaa, ensimmäisen pisteen klikkaus sulkee viivan, Esc peruuttaa.</div>';
+      + '<div class="slm-ohje" style="display:none"></div>';
     L.DomEvent.disableClickPropagation(div);
     div.querySelector('[data-t="aloita"]').onclick = () => aseta(true);
+    div.querySelector('[data-t="jatka"]').onclick = () => aseta("jatka");
+    div.querySelector('[data-t="yhdista"]').onclick = () => aseta("yhdista");
     div.querySelector('[data-t="valmis"]').onclick = () => piirto.valmis();
     div.querySelector('[data-t="peruuta"]').onclick = () => aseta(false);
     piirto.div = div;
@@ -70,16 +73,51 @@ function luoPiirto(L, tila) {
   };
   ohjain.addTo(kartta);
 
-  function aseta(paalla) {
-    piirto.paalla = paalla;
+  const OHJEET = {
+    piirto: "Klikkaa pisteitä järjestyksessä (napsahtaa pisteeseen). Tuplaklikkaus tai Valmis lopettaa, "
+      + "ensimmäisen pisteen klikkaus sulkee viivan, Esc peruuttaa.",
+    jatka: "Klikkaa avointa viivaa sen pään läheltä, jota jatketaan. Esc peruuttaa.",
+    yhdista: "Klikkaa ensimmäistä avointa viivaa yhdistettävän pään läheltä, sitten toista. Esc peruuttaa.",
+  };
+  // tila: false, true (uusi viiva), "jatka" tai "yhdista"
+  function aseta(t) {
+    const paalla = !!t;
+    piirto.paalla = t === true;
+    tila.tyokalu = typeof t === "string" ? t : null;
+    piirto.valittu = null;
     piirto.karjet = [];
     taso.clearLayers();
-    piirto.div.querySelector('[data-t="aloita"]').style.display = paalla ? "none" : "";
-    for (const t of ["valmis", "peruuta"]) piirto.div.querySelector(`[data-t="${t}"]`).style.display = paalla ? "" : "none";
-    piirto.div.querySelector(".slm-ohje").style.display = paalla ? "" : "none";
+    for (const n of ["aloita", "jatka", "yhdista"]) piirto.div.querySelector(`[data-t="${n}"]`).style.display = paalla ? "none" : "";
+    piirto.div.querySelector('[data-t="valmis"]').style.display = t === true ? "" : "none";
+    piirto.div.querySelector('[data-t="peruuta"]').style.display = paalla ? "" : "none";
+    const ohje = piirto.div.querySelector(".slm-ohje");
+    ohje.style.display = paalla ? "" : "none";
+    ohje.textContent = paalla ? OHJEET[t === true ? "piirto" : t] : "";
     kartta.getContainer().classList.toggle("slm-piirtaa", paalla);
     tila.ryhma.eachLayer((l) => { if (l.dragging) paalla ? l.dragging.disable() : l.dragging.enable(); });
   }
+  piirto.aseta = aseta;
+
+  // Jatka / Yhdistä: viivan klikkaus; pää = klikkausta lähempi pää
+  tila.tyokaluKlikkaus = (v, ll) => {
+    if (v.suljettu) return;
+    const p = kartta.latLngToContainerPoint(ll);
+    const d = (k) => p.distanceTo(kartta.latLngToContainerPoint(L.latLng(k[0], k[1])));
+    const paa = d(v.karjet[0]) <= d(v.karjet[v.karjet.length - 1]) ? "alku" : "loppu";
+    if (tila.tyokalu === "jatka") {
+      tila.setTriggerValue("muokkaus", { tyyppi: "jatka", viiva: v.nimi, paa });
+      aseta(false);
+    } else if (!piirto.valittu) {
+      piirto.valittu = { viiva: v.nimi, paa };
+      const k = paa === "alku" ? v.karjet[0] : v.karjet[v.karjet.length - 1];
+      L.circleMarker([k[0], k[1]], { radius: 8, color: "#d62728", fillOpacity: 0.3 }).addTo(taso);
+      piirto.div.querySelector(".slm-ohje").textContent = `${v.nimi} (${paa}) valittu. Klikkaa toista viivaa.`;
+    } else {
+      tila.setTriggerValue("muokkaus", { tyyppi: "leikkaus", viiva1: piirto.valittu.viiva, paa1: piirto.valittu.paa,
+                                         viiva2: v.nimi, paa2: paa });
+      aseta(false);
+    }
+  };
 
   function piirra() {
     taso.clearLayers();
@@ -107,7 +145,7 @@ function luoPiirto(L, tila) {
 
   kartta.on("click", (e) => { if (piirto.paalla) piirto.lisaa(...tila.piirtokohta(e.latlng)); });
   kartta.on("dblclick", (e) => { if (piirto.paalla) { L.DomEvent.stop(e); piirto.valmis(); } });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && piirto.paalla) aseta(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && (piirto.paalla || tila.tyokalu)) aseta(false); });
 }
 
 export default async function (component) {
@@ -203,6 +241,7 @@ export default async function (component) {
     viiva.on("click", (e) => {
       L.DomEvent.stopPropagation(e);
       if (tila.piirto.paalla) { tila.piirto.lisaa(...tila.piirtokohta(e.latlng)); return; }
+      if (tila.tyokalu) { tila.tyokaluKlikkaus(v, e.latlng); return; }
       setTriggerValue("muokkaus", { tyyppi: "lisaa", viiva: v.nimi, jalkeen: lahinJana(e.latlng), ...sijainti(e.latlng) });
     });
     viiva.on("contextmenu", (e) => {
@@ -232,11 +271,12 @@ export default async function (component) {
       m.on("dblclick", poista);
       m.on("contextmenu", poista);
       m.on("click", (e) => {
+        if (tila.tyokalu) { L.DomEvent.stop(e); tila.tyokaluKlikkaus(v, L.latLng(k[0], k[1])); return; }
         if (!tila.piirto.paalla) return;
         L.DomEvent.stop(e);
         tila.piirto.lisaa(L.latLng(k[0], k[1]), { kohde_viiva: v.nimi, kohde_karki: j });
       });
-      if (tila.piirto.paalla) m.dragging.disable();
+      if (tila.piirto.paalla || tila.tyokalu) m.dragging.disable();
     });
   }
   // Rajaus aluksi ja kun valittu viiva vaihtuu; muuten näkymä säilyy
@@ -332,6 +372,9 @@ def muokkaukseksi(tapahtuma, tulos, kohteet, uuden_nimi="Uusi viiva"):
             k["laji"] = "mitattu" if k["nimi"] else "käsin"
         return {"tyyppi": "uusi_viiva", "nimi": uuden_nimi, "suljettu": bool(tapahtuma.get("suljettu")),
                 "pohja": tulos["viivat"][0]["nimi"] if tulos["viivat"] else None, "karjet": karjet}
+    if tapahtuma["tyyppi"] in ("jatka", "leikkaus"):
+        return {k: tapahtuma[k] for k in ("tyyppi", "viiva", "paa", "viiva1", "paa1", "viiva2", "paa2")
+                if k in tapahtuma}
     m = {k: tapahtuma[k] for k in ("tyyppi", "viiva", "karki", "jalkeen", "jana") if k in tapahtuma}
     if m["tyyppi"] in ("poista", "poista_jana"):
         return m
@@ -351,6 +394,12 @@ def kuvaus(m):
         return f"{m['viiva']}: kärki {m['karki'] + 1} poistettu"
     if m["tyyppi"] == "poista_jana":
         return f"{m['viiva']}: jana kärjestä {m['jana'] + 1} seuraavaan poistettu"
+    if m["tyyppi"] == "jatka":
+        return f"{m['viiva']}: {m['paa']} jatkettu lähimpään viivaan"
+    if m["tyyppi"] == "leikkaus":
+        if m["viiva1"] == m["viiva2"]:
+            return f"{m['viiva1']}: päät yhdistetty leikkauspisteessä (suljettu)"
+        return f"{m['viiva1']} ja {m['viiva2']} yhdistetty leikkauspisteessä"
     if m["tyyppi"] == "uusi_viiva":
         return f"{m['nimi']}: uusi {'suljettu ' if m.get('suljettu') else ''}viiva ({len(m['karjet'])} kärkeä)"
     return str(m)

@@ -2188,11 +2188,81 @@ def suorakulmainen_piste(a, b, a_mitta, b_mitta):
     return (a[0] + a_mitta * ue + b_mitta * un, a[1] + a_mitta * un - b_mitta * ue)
 
 
+MUOKKAUS_MAX_M = 30.0      # jatke ja leikkauspiste enintään näin kaukana viivan päästä
+LEIKKAUS_MIN_KULMA = 10.0  # päätejanojen pienin kulma yhdistyksessä (lähes yhdensuuntaiset: leikkaus kaukana)
+
+
+def _paa_ja_suunta(karjet, paa):
+    """Avoimen viivan pää: (päätepiste, yksikkösuunta ulospäin viimeistä janaa pitkin)."""
+    a, b = (karjet[1], karjet[0]) if paa == "alku" else (karjet[-2], karjet[-1])
+    de, dn = b["e"] - a["e"], b["n"] - a["n"]
+    pituus = math.hypot(de, dn)
+    if pituus < 1e-9:
+        raise ValueError("Päätejanan suuntaa ei voi laskea (kaksi kärkeä samassa kohdassa).")
+    return (b["e"], b["n"]), (de / pituus, dn / pituus)
+
+
+def _leikkaus_suorat(p, d, q, f):
+    """Suorien p + t·d ja q + u·f leikkaus: (t, u) tai None, jos suorat ovat (lähes) yhdensuuntaiset."""
+    det = d[0] * (-f[1]) - d[1] * (-f[0])
+    if abs(det) < 1e-9:
+        return None
+    rx, ry = q[0] - p[0], q[1] - p[1]
+    t = (rx * (-f[1]) - ry * (-f[0])) / det
+    u = (d[0] * ry - d[1] * rx) / det
+    return t, u
+
+
+def _janat(viiva):
+    k = viiva["karjet"]
+    parit = list(zip(k, k[1:])) + ([(k[-1], k[0])] if viiva["suljettu"] and len(k) > 2 else [])
+    return [((a["e"], a["n"]), (b["e"], b["n"])) for a, b in parit]
+
+
+def jatkokohta(tulos, viiva_nimi, paa, kohde=None):
+    """Avoimen viivan pään jatke viimeisen janan suuntaan lähimpään toiseen viivaan (tai kohde-viivaan),
+    enintään MUOKKAUS_MAX_M: ((e, n), osuttu viiva) tai None. Oman viivan muut kuin päätejanat kelpaavat myös."""
+    viiva = next(v for v in tulos["viivat"] if v["nimi"] == viiva_nimi)
+    p, d = _paa_ja_suunta(viiva["karjet"], paa)
+    paras = None
+    for v in tulos["viivat"]:
+        if kohde and v["nimi"] != kohde:
+            continue
+        janat = _janat(v)
+        if v is viiva:   # oma viiva: ei päätejanaa eikä sen naapuria
+            janat = janat[1:-1] if len(janat) > 2 else []
+            janat = janat[1:] if paa == "alku" else janat[:-1]
+        for a, b in janat:
+            f = (b[0] - a[0], b[1] - a[1])
+            tu = _leikkaus_suorat(p, d, a, f)
+            if (tu and 1e-6 < tu[0] <= MUOKKAUS_MAX_M and -1e-9 <= tu[1] <= 1 + 1e-9
+                    and (paras is None or tu[0] < paras[0])):
+                paras = (tu[0], (p[0] + tu[0] * d[0], p[1] + tu[0] * d[1]), v["nimi"])
+    return None if paras is None else (paras[1], paras[2])
+
+
+def lahimmat_paat(v1, v2):
+    """Kahden avoimen viivan lähimmät päät ("alku"/"loppu", "alku"/"loppu"); sama viiva: alku ja loppu."""
+    if v1 is v2:
+        return "loppu", "alku"
+    paat = {"alku": 0, "loppu": -1}
+    return min(((a, b) for a in paat for b in paat),
+               key=lambda ab: math.hypot(v1["karjet"][paat[ab[0]]]["e"] - v2["karjet"][paat[ab[1]]]["e"],
+                                         v1["karjet"][paat[ab[0]]]["n"] - v2["karjet"][paat[ab[1]]]["n"]))
+
+
 def viivojen_tunniste(tulos):
     """Viivojen nimet ja kärjet pyöristettynä: automaattisen viivan muuttuminen (järjestys, kantakartta,
     LiDAR) havaitaan tästä, jolloin sen päälle tehdyt muokkaukset eivät enää päde."""
     return tuple((v["nimi"], v["suljettu"], tuple((round(k["e"], 3), round(k["n"], 3)) for k in v["karjet"]))
                  for v in tulos.get("viivat", []))
+
+
+def _kaanna_kaaret(karjet):
+    """Käännetyn kärkilistan kaaret: kaari kärjestä seuraavaan siirtyy edelliselle ja vaihtaa suuntaa."""
+    bulget = [k.get("bulge") or 0.0 for k in karjet]
+    for i in range(len(karjet)):
+        karjet[i]["bulge"] = -bulget[i + 1] if i + 1 < len(karjet) else 0.0
 
 
 def sovella_muokkaukset(tulos, muokkaukset):
@@ -2208,6 +2278,11 @@ def sovella_muokkaukset(tulos, muokkaukset):
           poistuu kokonaan
       {"tyyppi": "uusi_viiva", "nimi", "pohja", "karjet": [{"e", "n", "z", "nimi", "laji"}], "suljettu"} --
           uusi viiva (suljettu vain, jos kärkiä on vähintään kolme) viivan "pohja" tasolle (DXF ja kanta)
+      {"tyyppi": "jatka", "viiva", "paa": "alku"/"loppu", "kohde": viiva tai None} -- avoimen viivan pää jatketaan
+          viimeisen janan suuntaan lähimpään toiseen viivaan; osumakohtaan uusi laskettu kärki
+      {"tyyppi": "leikkaus", "viiva1", "viiva2", "paa1", "paa2"} -- kahden avoimen viivan päätejanat
+          leikkauspisteeseen (päätä lyhennetään tai leikkauspiste lisätään) ja viivat yhdeksi (sama viiva:
+          suljetaan); päät None = lähimmät päät
     Muokkaus, joka ei enää osu (viiva tai kärki puuttuu), ohitetaan ja siitä tulee varoitus."""
     import copy
 
@@ -2219,8 +2294,80 @@ def sovella_muokkaukset(tulos, muokkaukset):
         return {"e": m["e"], "n": m["n"], "z": m.get("z"), "laji": laji, "nimi": m.get("nimi") or laji,
                 "bulge": 0.0}
 
+    def kulma(e, n, nimi):
+        return {"e": e, "n": n, "z": None, "laji": "laskettu", "nimi": nimi, "bulge": 0.0}
+
     for m in muokkaukset:
         tyyppi = m.get("tyyppi")
+        if tyyppi == "leikkaus":
+            v1, v2 = viivat.get(m.get("viiva1")), viivat.get(m.get("viiva2"))
+            if not v1 or not v2 or v1["suljettu"] or v2["suljettu"] or len(v1["karjet"]) < 2 or len(v2["karjet"]) < 2:
+                uusi["varoitukset"].append("Yhdistys ohitettiin: viivoja ei ole tai ne eivät ole avoimia.")
+                continue
+            paa1, paa2 = (m["paa1"], m["paa2"]) if m.get("paa1") and m.get("paa2") else lahimmat_paat(v1, v2)
+            if v1 is v2 and paa1 == paa2:
+                uusi["varoitukset"].append("Yhdistys ohitettiin: saman viivan sama pää.")
+                continue
+            try:
+                (p, d), (q, f) = _paa_ja_suunta(v1["karjet"], paa1), _paa_ja_suunta(v2["karjet"], paa2)
+            except ValueError as e:
+                uusi["varoitukset"].append(f"Yhdistys ohitettiin: {e}")
+                continue
+            kulma_aste = math.degrees(math.acos(min(1.0, abs(d[0] * f[0] + d[1] * f[1]))))
+            tu = _leikkaus_suorat(p, d, q, f) if kulma_aste >= LEIKKAUS_MIN_KULMA else None
+            if tu is None:
+                uusi["varoitukset"].append(f"Yhdistys ohitettiin: {v1['nimi']} ja {v2['nimi']} ovat (lähes) "
+                                           f"yhdensuuntaiset ({kulma_aste:.0f}°).")
+                continue
+            if max(abs(tu[0]), abs(tu[1])) > MUOKKAUS_MAX_M:
+                uusi["varoitukset"].append(f"Yhdistys ohitettiin: leikkauspiste on yli {MUOKKAUS_MAX_M:.0f} m "
+                                           "päässä viivojen päistä.")
+                continue
+            x = (p[0] + tu[0] * d[0], p[1] + tu[0] * d[1])
+            for v, paa, t in ((v1, paa1, tu[0]), (v2, paa2, tu[1])):
+                i = 0 if paa == "alku" else len(v["karjet"]) - 1
+                if t < 0:      # pää on leikkauspisteen ohi: lyhennetään
+                    v["karjet"][i].update(e=x[0], n=x[1], laji="laskettu", nimi="leikkaus", z=None)
+                elif t > 1e-6:
+                    v["karjet"].insert(0 if paa == "alku" else len(v["karjet"]), kulma(x[0], x[1], "leikkaus"))
+            if v1 is v2:
+                k = v1["karjet"]
+                v1["karjet"] = k[1:] if paa1 == "alku" else k[:-1]   # leikkauspiste kerran
+                v1["suljettu"] = True
+                continue
+            a = v1["karjet"] if paa1 == "loppu" else list(reversed(v1["karjet"]))
+            b = v2["karjet"] if paa2 == "alku" else list(reversed(v2["karjet"]))
+            if paa1 == "alku":
+                _kaanna_kaaret(a)
+            if paa2 == "loppu":
+                _kaanna_kaaret(b)
+            a[-1]["bulge"] = b[0].get("bulge") or 0.0
+            v1["karjet"] = a + b[1:]
+            uusi["viivat"].remove(v2)
+            del viivat[v2["nimi"]]
+            continue
+        if tyyppi == "jatka":
+            viiva = viivat.get(m.get("viiva"))
+            if not viiva or viiva["suljettu"] or len(viiva["karjet"]) < 2:
+                uusi["varoitukset"].append(f"Jatko ohitettiin: {m.get('viiva')} ei ole avoin viiva.")
+                continue
+            try:
+                kohta = jatkokohta(uusi, viiva["nimi"], m["paa"], m.get("kohde"))
+            except ValueError as e:
+                kohta, virhe = None, str(e)
+            else:
+                virhe = "jatke ei osu mihinkään viivaan"
+            if kohta is None:
+                uusi["varoitukset"].append(f"Jatko ohitettiin: {viiva['nimi']}: {virhe}.")
+                continue
+            (e, n), osuttu = kohta
+            k = kulma(e, n, f"jatke ({osuttu})")
+            if m["paa"] == "alku":
+                viiva["karjet"].insert(0, k)
+            else:
+                viiva["karjet"][-1]["bulge"] = 0.0
+                viiva["karjet"].append(k)
+            continue
         if tyyppi == "uusi_viiva":
             pohja = viivat.get(m.get("pohja")) or (uusi["viivat"][0] if uusi["viivat"] else None)
             viiva = {"nimi": m["nimi"], "karjet": [dict(karki(k, k.get("laji") or "laskettu")) for k in m["karjet"]],

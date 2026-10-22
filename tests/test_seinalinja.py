@@ -920,3 +920,52 @@ def test_sovella_muokkaukset_poista_jana():
     # yhden janan viiva poistuu kokonaan
     pois = sl.sovella_muokkaukset(kaksi, [{"tyyppi": "poista_jana", "viiva": f"{viiva} (osa 2)", "jana": 0}])
     assert [x["nimi"] for x in pois["viivat"]] == [viiva]
+
+
+def _viivat(**viivat):
+    return {"viivat": [{"nimi": nimi, "suljettu": False, "numero": 1, "avain": ("", (), 1),
+                        "karjet": [{"e": E0 + x, "n": N0 + y, "z": None, "laji": "mitattu", "nimi": f"{nimi}{i}",
+                                    "bulge": 0.0} for i, (x, y) in enumerate(xy)]}
+                       for nimi, xy in viivat.items()], "pisteet": [], "varoitukset": []}
+
+
+def test_jatka_viiva_lahimpaan():
+    tulos = _viivat(A=[(0, 0), (10, 0)], B=[(12, -5), (12, 5)], C=[(20, -5), (20, 5)])
+    uusi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "jatka", "viiva": "A", "paa": "loppu"}])
+    a = uusi["viivat"][0]
+    assert karjet_xy(a) == [(0, 0), (10, 0), (12, 0)] and a["karjet"][-1]["laji"] == "laskettu"
+    assert "B" in a["karjet"][-1]["nimi"]
+    # alku jatkuu taaksepäin; ei osumaa -> varoitus
+    ohi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "jatka", "viiva": "A", "paa": "alku"}])
+    assert karjet_xy(ohi["viivat"][0]) == [(0, 0), (10, 0)] and any("Jatko ohitettiin" in v for v in ohi["varoitukset"])
+
+
+def test_yhdista_leikkauspisteessa():
+    # A:ta jatketaan ja C:tä jatketaan -> yksi viiva leikkauspisteen kautta
+    tulos = _viivat(A=[(0, 0), (10, 0)], C=[(11, 3), (11, 8)])
+    uusi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "leikkaus", "viiva1": "A", "viiva2": "C"}])
+    assert [v["nimi"] for v in uusi["viivat"]] == ["A"]
+    assert karjet_xy(uusi["viivat"][0]) == [(0, 0), (10, 0), (11, 0), (11, 3), (11, 8)]
+    # A menee leikkauspisteen ohi -> lyhennetään
+    tulos = _viivat(A=[(0, 0), (13, 0)], C=[(11, 8), (11, 3)])
+    uusi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "leikkaus", "viiva1": "A", "viiva2": "C"}])
+    assert karjet_xy(uusi["viivat"][0]) == [(0, 0), (11, 0), (11, 3), (11, 8)]
+    # yhdensuuntaiset -> varoitus, ei muutosta
+    tulos = _viivat(A=[(0, 0), (10, 0)], C=[(12, 1), (20, 1)])
+    uusi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "leikkaus", "viiva1": "A", "viiva2": "C"}])
+    assert len(uusi["viivat"]) == 2 and any("yhdensuuntaiset" in v for v in uusi["varoitukset"])
+    # lähes yhdensuuntaiset (5°): leikkaus kaukana -> ohitetaan
+    tulos = _viivat(A=[(0, 0), (10, 0)], C=[(12, 1), (22, 1 + 10 * 0.0875)])
+    uusi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "leikkaus", "viiva1": "A", "viiva2": "C"}])
+    assert len(uusi["viivat"]) == 2 and any("yhdensuuntaiset" in v for v in uusi["varoitukset"])
+    # jatke yli 30 m -> ei osu
+    tulos = _viivat(A=[(0, 0), (10, 0)], B=[(45, -5), (45, 5)])
+    uusi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "jatka", "viiva": "A", "paa": "loppu"}])
+    assert any("Jatko ohitettiin" in v for v in uusi["varoitukset"])
+
+
+def test_yhdista_saman_viivan_paat_sulkee():
+    tulos = _viivat(U=[(2, 5), (0, 0), (10, 0), (8, 5)])
+    uusi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "leikkaus", "viiva1": "U", "viiva2": "U"}])
+    u = uusi["viivat"][0]
+    assert u["suljettu"] and karjet_xy(u) == [(5, 12.5), (2, 5), (0, 0), (10, 0), (8, 5)]

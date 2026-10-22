@@ -582,6 +582,31 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     if tila["muokkaukset"]:
         st.caption("Muokkaukset: " + "; ".join(slm.kuvaus(m) for m in tila["muokkaukset"]))
 
+    avoimet = [v["nimi"] for v in sl_tulos["viivat"] if not v["suljettu"] and len(v["karjet"]) >= 2]
+    with st.container(border=True):
+        st.markdown("**Jatka viivaa / yhdistä leikkauspisteessä**")
+        st.caption("Jatka: avoimen viivan pää jatketaan viimeisen janan suuntaan lähimpään toiseen viivaan. "
+                   "Yhdistä: kahden avoimen viivan päätejanat jatketaan (tai lyhennetään) leikkauspisteeseen ja "
+                   "viivat yhdistyvät; saman viivan päät sulkevat viivan. Kartalla napit ⇥ Jatka ja ✕ Yhdistä.")
+        if not avoimet:
+            st.caption("Avoimia viivoja ei ole.")
+        else:
+            sarakkeet = st.columns([2, 1, 1])
+            jv = sarakkeet[0].selectbox("Jatkettava viiva", avoimet, key="sl_jatka_viiva")
+            paa = sarakkeet[1].radio("Pää", ["loppu", "alku"], horizontal=True, key="sl_jatka_paa")
+            sarakkeet[2].write("")
+            if sarakkeet[2].button("Jatka", key="sl_jatka"):
+                tila["muokkaukset"].append({"tyyppi": "jatka", "viiva": jv, "paa": paa})
+                st.rerun()
+            sarakkeet = st.columns([2, 2, 1])
+            y1 = sarakkeet[0].selectbox("Viiva 1", avoimet, key="sl_leikkaus_1")
+            y2 = sarakkeet[1].selectbox("Viiva 2", avoimet, index=min(1, len(avoimet) - 1), key="sl_leikkaus_2")
+            sarakkeet[2].write("")
+            if sarakkeet[2].button("Yhdistä", key="sl_leikkaus"):
+                tila["muokkaukset"].append({"tyyppi": "leikkaus", "viiva1": y1, "viiva2": y2, "paa1": None,
+                                            "paa2": None})
+                st.rerun()
+
     with st.container(border=True):
         st.markdown("**Poista jana**")
         st.caption("Suljettu viiva aukeaa poistetun janan kohdalta, avoin viiva katkeaa kahdeksi viivaksi. "
