@@ -2203,6 +2203,9 @@ def sovella_muokkaukset(tulos, muokkaukset):
       {"tyyppi": "lisaa", "viiva", "jalkeen", "e", "n", "z", "nimi", "laji"} -- uusi kärki kärjen
           "jalkeen" jälkeen (-1 = alkuun); jaettu jana muuttuu suoraksi
       {"tyyppi": "poista", "viiva", "karki"}
+      {"tyyppi": "poista_jana", "viiva", "jana"} -- jana kärjestä "jana" seuraavaan pois: suljettu viiva
+          aukeaa siitä kohdasta, avoin katkeaa kahdeksi viivaksi (toinen "... (osa 2)"); yhden janan viiva
+          poistuu kokonaan
       {"tyyppi": "uusi_viiva", "nimi", "pohja", "karjet": [{"e", "n", "z", "nimi", "laji"}]} -- avoin viiva
           viivan "pohja" tasolle (DXF ja kanta)
     Muokkaus, joka ei enää osu (viiva tai kärki puuttuu), ohitetaan ja siitä tulee varoitus."""
@@ -2241,6 +2244,28 @@ def sovella_muokkaukset(tulos, muokkaukset):
             if m["jalkeen"] >= 0:
                 karjet[m["jalkeen"]]["bulge"] = 0.0
             karjet.insert(m["jalkeen"] + 1, karki(m, m.get("laji") or ("mitattu" if m.get("nimi") else "käsin")))
+        elif tyyppi == "poista_jana" and 0 <= m.get("jana", -1) < (len(karjet) if viiva["suljettu"]
+                                                                  else len(karjet) - 1):
+            i = m["jana"]
+            karjet[i]["bulge"] = 0.0
+            if viiva["suljettu"]:
+                viiva["karjet"] = karjet[i + 1:] + karjet[:i + 1]
+                viiva["suljettu"] = False
+                continue
+            osat = [karjet[:i + 1], karjet[i + 1:]]
+            if len(osat[0]) >= 2:
+                viiva["karjet"] = osat[0]
+            else:
+                uusi["viivat"].remove(viiva)
+                del viivat[viiva["nimi"]]
+            if len(osat[1]) >= 2:
+                nimi, n = f"{viiva['nimi']} (osa 2)", 2
+                while nimi in viivat:
+                    n += 1
+                    nimi = f"{viiva['nimi']} (osa {n})"
+                toinen = dict(viiva, nimi=nimi, karjet=osat[1], suljettu=False)
+                uusi["viivat"].append(toinen)
+                viivat[nimi] = toinen
         elif tyyppi == "poista" and 0 <= m.get("karki", -1) < len(karjet) and len(karjet) > 2:
             if m["karki"] > 0:
                 karjet[m["karki"] - 1]["bulge"] = 0.0

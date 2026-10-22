@@ -1,7 +1,8 @@
 """
 seinalinjan_muokkain.py -- Seinälinjan muokkauskartta sovellukseen (Streamlitin oma komponentti,
 st.components.v2): kärkiä raahataan hiirellä ja ne napsahtavat mitattuun pisteeseen tai toisen viivan
-kärkeen, viivaa klikkaamalla tulee uusi kärki ja kärjen tuplaklikkaus (tai oikea klikkaus) poistaa sen.
+kärkeen, viivaa klikkaamalla tulee uusi kärki, viivan oikea klikkaus poistaa janan ja kärjen tuplaklikkaus
+(tai oikea klikkaus) poistaa kärjen.
 
 Kartta toimii selaimessa WGS84:ssä (Leaflet samasta CDN:stä kuin foliumin kartat). Muokkaus palaa
 Pythonille tapahtumana, ja muokkaukseksi() tekee siitä seinalinja.sovella_muokkaukset()-muokkauksen
@@ -106,10 +107,9 @@ export default async function (component) {
       .bindTooltip(v.nimi).addTo(ryhma);
     v.piirto.forEach((q) => kaikki.push(q));
     if (!muokattava) continue;
-    // Klikkaus viivalle: uusi kärki lähimmälle janalle
-    viiva.on("click", (e) => {
-      L.DomEvent.stopPropagation(e);
-      const p = kartta.latLngToContainerPoint(e.latlng);
+    // Klikatun kohdan jana (kärjestä i seuraavaan)
+    const lahinJana = (ll) => {
+      const p = kartta.latLngToContainerPoint(ll);
       const n = v.karjet.length, janoja = v.suljettu ? n : n - 1;
       let paras = 0, pienin = Infinity;
       for (let i = 0; i < janoja; i++) {
@@ -118,7 +118,16 @@ export default async function (component) {
         const d = L.LineUtil.pointToSegmentDistance(p, a, b);
         if (d < pienin) { pienin = d; paras = i; }
       }
-      setTriggerValue("muokkaus", { tyyppi: "lisaa", viiva: v.nimi, jalkeen: paras, ...sijainti(e.latlng) });
+      return paras;
+    };
+    // Klikkaus viivalle: uusi kärki; oikea klikkaus: jana pois
+    viiva.on("click", (e) => {
+      L.DomEvent.stopPropagation(e);
+      setTriggerValue("muokkaus", { tyyppi: "lisaa", viiva: v.nimi, jalkeen: lahinJana(e.latlng), ...sijainti(e.latlng) });
+    });
+    viiva.on("contextmenu", (e) => {
+      L.DomEvent.stop(e);
+      setTriggerValue("muokkaus", { tyyppi: "poista_jana", viiva: v.nimi, jana: lahinJana(e.latlng) });
     });
     v.karjet.forEach((k, j) => {
       const luokka = "slm-karki" + (k[3] === "laskettu" ? " laskettu" : k[3] === "käsin" ? " kasin" : "");
@@ -212,8 +221,8 @@ def _3879(lat, lon):
 
 def muokkaukseksi(tapahtuma, tulos, kohteet):
     """Kartan tapahtuma seinalinja.sovella_muokkaukset()-muokkaukseksi EPSG:3879:ssä."""
-    m = {k: tapahtuma[k] for k in ("tyyppi", "viiva", "karki", "jalkeen") if k in tapahtuma}
-    if m["tyyppi"] == "poista":
+    m = {k: tapahtuma[k] for k in ("tyyppi", "viiva", "karki", "jalkeen", "jana") if k in tapahtuma}
+    if m["tyyppi"] in ("poista", "poista_jana"):
         return m
     if tapahtuma.get("piste") is not None:
         nimi, _, e, n, z = kohteet[int(tapahtuma["piste"])]
@@ -238,6 +247,8 @@ def kuvaus(m):
         return f"{m['viiva']}: uusi kärki ({kohde}) kärjen {m['jalkeen'] + 1} jälkeen"
     if m["tyyppi"] == "poista":
         return f"{m['viiva']}: kärki {m['karki'] + 1} poistettu"
+    if m["tyyppi"] == "poista_jana":
+        return f"{m['viiva']}: jana kärjestä {m['jana'] + 1} seuraavaan poistettu"
     if m["tyyppi"] == "uusi_viiva":
         return f"{m['nimi']}: uusi viiva ({len(m['karjet'])} kärkeä)"
     return str(m)

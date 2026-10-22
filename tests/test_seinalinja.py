@@ -902,3 +902,21 @@ def test_sovella_muokkaukset_uusi_viiva_ja_ohitus():
     # viivaan ei jätetä alle kahta kärkeä
     kaksi = sl.sovella_muokkaukset(uusi, [{"tyyppi": "poista", "viiva": "Lisätty viiva 1", "karki": 0}])
     assert len(kaksi["viivat"][-1]["karjet"]) == 2
+
+
+def test_sovella_muokkaukset_poista_jana():
+    tulos = _neliö()
+    viiva = tulos["viivat"][0]["nimi"]
+    k = karjet_xy(tulos["viivat"][0])          # 4 kärkeä, suljettu
+    # suljettu aukeaa: jana kärjestä 2 kärkeen 3 pois -> avoin 3-4-1-2
+    auki = sl.sovella_muokkaukset(tulos, [{"tyyppi": "poista_jana", "viiva": viiva, "jana": 1}])
+    v = auki["viivat"][0]
+    assert not v["suljettu"] and karjet_xy(v) == [k[2], k[3], k[0], k[1]]
+    # avoin katkeaa kahdeksi: 3-4 | 1-2
+    kaksi = sl.sovella_muokkaukset(auki, [{"tyyppi": "poista_jana", "viiva": viiva, "jana": 1}])
+    assert [(x["nimi"], karjet_xy(x)) for x in kaksi["viivat"]] == [
+        (viiva, [k[2], k[3]]), (f"{viiva} (osa 2)", [k[0], k[1]])]
+    assert kaksi["viivat"][1]["avain"] == v["avain"]
+    # yhden janan viiva poistuu kokonaan
+    pois = sl.sovella_muokkaukset(kaksi, [{"tyyppi": "poista_jana", "viiva": f"{viiva} (osa 2)", "jana": 0}])
+    assert [x["nimi"] for x in pois["viivat"]] == [viiva]

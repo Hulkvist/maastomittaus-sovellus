@@ -559,9 +559,9 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     """Muokkauskartta (seinalinjan_muokkain), Kumoa/Palauta ja suorakulmainen mittaus."""
     kohteet = slm.napsahduspisteet(jx.pisteet_tallennettavaksi(pisteet))
     st.caption("Raahaa kärkeä hiirellä: se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen, kun se on "
-               "lähellä (kärki muuttuu vihreäksi). Klikkaa viivaa = uusi kärki. Tuplaklikkaa (tai oikea klikkaus) "
-               "kärkeä = poista. Punainen kärki = laskettu kulma, oranssi = käsin siirretty. Taustakartan voi "
-               "vaihtaa oikeasta yläkulmasta.")
+               "lähellä (kärki muuttuu vihreäksi). Klikkaa viivaa = uusi kärki, oikea klikkaus viivaan = poista "
+               "jana. Tuplaklikkaa (tai oikea klikkaus) kärkeä = poista kärki. Punainen kärki = laskettu kulma, "
+               "oranssi = käsin siirretty. Taustakartan voi vaihtaa oikeasta yläkulmasta.")
     tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu)
     if tapahtuma:
         try:
@@ -579,6 +579,24 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
         st.rerun()
     if tila["muokkaukset"]:
         st.caption("Muokkaukset: " + "; ".join(slm.kuvaus(m) for m in tila["muokkaukset"]))
+
+    with st.container(border=True):
+        st.markdown("**Poista jana**")
+        st.caption("Suljettu viiva aukeaa poistetun janan kohdalta, avoin viiva katkeaa kahdeksi viivaksi. "
+                   "Kartalla saman saa oikealla klikkauksella viivaan.")
+        sarakkeet = st.columns([2, 3, 1])
+        viivanimet = [v["nimi"] for v in sl_tulos["viivat"]]
+        jv = sarakkeet[0].selectbox("Viiva", viivanimet,
+                                    index=viivanimet.index(valittu) if valittu in viivanimet else 0, key="sl_jana_viiva")
+        v = next(x for x in sl_tulos["viivat"] if x["nimi"] == jv)
+        n = len(v["karjet"])
+        janat = [f"kärki {i + 1} ({v['karjet'][i].get('nimi')}) – kärki {(i + 1) % n + 1} "
+                 f"({v['karjet'][(i + 1) % n].get('nimi')})" for i in range(n if v["suljettu"] else n - 1)]
+        jana = sarakkeet[1].selectbox("Jana", janat, key="sl_jana_jana")
+        sarakkeet[2].write("")
+        if sarakkeet[2].button("Poista jana", key="sl_jana_poista", disabled=not janat):
+            tila["muokkaukset"].append({"tyyppi": "poista_jana", "viiva": jv, "jana": janat.index(jana)})
+            st.rerun()
 
     with st.container(border=True):
         st.markdown("**Suorakulmainen mittaus**")
