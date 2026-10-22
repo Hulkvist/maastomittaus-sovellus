@@ -1557,8 +1557,10 @@ def _mittaustiedot(p):
 
 
 def tallenna_mittaukset_kantaan(kiinteistotunnus, pisteet, db_conn, raportti=None):
-    """Pisteet kentalla_mitatut_pisteet-tauluun. raportti (jasenna_tyo()-tulos) antaa pisteille
-    aseman ja mittausjärjestyksen (QGIS-animaatio); ilman sitä ne jäävät tyhjiksi."""
+    """Pisteet kentalla_mitatut_pisteet-tauluun. Saman kiinteistön ja lähdetiedoston aiemmat pisteet
+    korvataan (sama JXL uudelleen ei tuplaa, kuten raportti, asemat ja seinälinja). raportti
+    (jasenna_tyo()-tulos) antaa pisteille aseman ja mittausjärjestyksen (QGIS-animaatio); ilman sitä
+    ne jäävät tyhjiksi."""
     import hae_kiintopisteet as hk
 
     if not pisteet:
@@ -1566,6 +1568,9 @@ def tallenna_mittaukset_kantaan(kiinteistotunnus, pisteet, db_conn, raportti=Non
     _, jarjestys = mittausjarjestys(raportti, pisteet) if raportti else (None, [(None, None, None)] * len(pisteet))
     lisatty = 0
     with hk.kanta(db_conn) as cur:
+        for lahde in sorted({p.get("lahdetiedosto") for p in pisteet if p.get("lahdetiedosto")}):
+            cur.execute("DELETE FROM kentalla_mitatut_pisteet WHERE kiinteistotunnus = %s AND lahdetiedosto = %s;",
+                        (kiinteistotunnus, lahde))
         for p, (asema, asema_nro, nro) in zip(pisteet, jarjestys):
             if p.get("e") is None or p.get("n") is None:
                 continue

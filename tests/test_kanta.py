@@ -182,6 +182,10 @@ def test_mittausten_tallennus_ja_poistot(db):
     tallennettavat = jx.pisteet_tallennettavaksi(pisteet)
     assert len(tallennettavat) == len(pisteet) - 3  # RTK-alkuperäismittaukset pois
     assert jx.tallenna_mittaukset_kantaan("091-1-1-1", tallennettavat, db) == len(tallennettavat)
+    # sama tiedosto uudelleen korvaa aiemmat pisteet (ei tuplia)
+    assert jx.tallenna_mittaukset_kantaan("091-1-1-1", tallennettavat, db) == len(tallennettavat)
+    assert kysy(db, "SELECT count(*) FROM kentalla_mitatut_pisteet WHERE kiinteistotunnus = '091-1-1-1';") == \
+        [(len(tallennettavat),)]
     assert jx.tallenna_mittaukset_kantaan("091-1-1-2", tallennettavat[:2], db) == 2
 
     rivi = kysy(db, "SELECT kuvaus, tarkkuusluokka, mittaustapa, vinoetaisyys > 0 FROM kentalla_mitatut_pisteet "

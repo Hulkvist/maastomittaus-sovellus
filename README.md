@@ -75,7 +75,7 @@ Taulut (kaikki EPSG:3879):
 | `asemapisteet` | Kojeasemat laatuluokkineen, residuaaleineen ja keskivirheineen (mm); `liitospisteet` = orientoinnin liitospisteet ja niiden vaakaresiduaalit |
 | `asemien_liitokset` | Viiva asemalta jokaiseen liitospisteeseen ja korkeusliitokseen residuaaleineen (mm) |
 
-*Tallenna mittaukset kantaan* vie pisteet, mittausraportin, asemapisteet ja Seinälinja-osiossa näkyvän seinälinjan (valittu järjestys, kantakartta- ja LiDAR-valinnat) samalla kertaa. Saman kiinteistön ja tiedoston raportti ja asemat korvataan uudelleentallennuksessa. Tallennetut raportit haetaan ja PDF:t ladataan sovelluksen osiosta *Tallennetut mittausraportit*.
+*Tallenna mittaukset kantaan* vie pisteet, mittausraportin, asemapisteet ja Seinälinja-osiossa näkyvän seinälinjan (valittu järjestys, kantakartta- ja LiDAR-valinnat) samalla kertaa. Saman kiinteistön ja tiedoston pisteet, raportti, asemat ja seinälinja korvataan uudelleentallennuksessa (ei tuplia). Tallennetut raportit haetaan ja PDF:t ladataan sovelluksen osiosta *Tallennetut mittausraportit*.
 
 ### QGIS-tyylit
 
