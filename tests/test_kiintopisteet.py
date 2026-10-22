@@ -87,3 +87,23 @@ def test_nimi_ja_koodi_ennen_koordinaatteja():
     """Sovelluksen oma kiintopisteet.txt (nimi koodi N E Z): tunnus on nimi, koodi toinen kenttä."""
     pisteet, _ = hk.jasenna_kiintopiste_txt(f"123 11 {N} {E} 1.0\nR7 {N} {E}\n")
     assert [(p["tunnus"], p["koodi"]) for p in pisteet] == [("123", "11"), ("R7", None)]
+
+
+def test_wms_aikakatkaisu_ohittaa_seuraavat_asemakartat(tmp_path, monkeypatch):
+    """Jos Helsingin WMS ei vastaa (Streamlit Cloudista yhteys voi takkuilla), vain ensimmäinen
+    asemapistekartta odottaa (10 s aikaraja); seuraavat piirretään heti ilman taustaa."""
+    import requests
+
+    import hae_kiintopisteet as hk
+    kutsut = []
+
+    def aikakatkaisu(*a, **k):
+        kutsut.append(k.get("timeout"))
+        raise requests.Timeout("aikakatkaisu")
+
+    monkeypatch.setattr(hk.requests, "get", aikakatkaisu)
+    monkeypatch.setattr(hk, "_wms_tauko_asti", [0.0])
+    hk._hae_wms_kuva.cache_clear()
+    for i in range(4):
+        assert hk.piirra_asemapisteen_pienikartta(6680630.0 + i, 25496280.0, [], [], str(tmp_path / f"a{i}.png"))
+    assert kutsut == [10]
