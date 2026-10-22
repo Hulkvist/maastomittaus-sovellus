@@ -55,6 +55,7 @@ import hae_kiintopisteet as hk
 import jobxml_tuonti as jx
 import mittausraportti as mr
 import seinalinja as sl
+import seinalinjan_muokkain as slm
 
 
 _AJON_ALKU = time.time()
@@ -547,6 +548,93 @@ def _seinalinjan_kantakartta(pisteet):
     return valimuisti[bbox] or None, None, True
 
 
+def _seinalinjan_muokkaukset(raaka_bytes):
+    """Tiedoston seinälinjan käsin tehdyt muokkaukset istunnossa: {"pohja": automaattisen viivan
+    tunniste, "muokkaukset": [...]} (seinalinja.sovella_muokkaukset)."""
+    avain = "_sl_muokkaukset_" + hashlib.sha1(raaka_bytes).hexdigest()
+    return st.session_state.setdefault(avain, {"pohja": None, "muokkaukset": []})
+
+
+def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
+    """Muokkauskartta (seinalinjan_muokkain), Kumoa/Palauta ja suorakulmainen mittaus."""
+    kohteet = slm.napsahduspisteet(jx.pisteet_tallennettavaksi(pisteet))
+    st.caption("Raahaa kärkeä hiirellä: se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen, kun se on "
+               "lähellä (kärki muuttuu vihreäksi). Klikkaa viivaa = uusi kärki. Tuplaklikkaa (tai oikea klikkaus) "
+               "kärkeä = poista. Punainen kärki = laskettu kulma, oranssi = käsin siirretty. Taustakartan voi "
+               "vaihtaa oikeasta yläkulmasta.")
+    tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu)
+    if tapahtuma:
+        try:
+            tila["muokkaukset"].append(slm.muokkaukseksi(tapahtuma, sl_tulos, kohteet))
+        except Exception as e:
+            st.error(f"Muokkausta ei voitu tehdä: {e}")
+        else:
+            st.rerun()
+    napit = st.columns([1, 1, 3])
+    if napit[0].button("Kumoa viimeisin", disabled=not tila["muokkaukset"], key="sl_kumoa"):
+        tila["muokkaukset"].pop()
+        st.rerun()
+    if napit[1].button("Palauta automaattinen viiva", disabled=not tila["muokkaukset"], key="sl_palauta"):
+        tila["muokkaukset"].clear()
+        st.rerun()
+    if tila["muokkaukset"]:
+        st.caption("Muokkaukset: " + "; ".join(slm.kuvaus(m) for m in tila["muokkaukset"]))
+
+    with st.container(border=True):
+        st.markdown("**Suorakulmainen mittaus**")
+        st.caption("A ja B = mitattu piste tai viivan kärki. a-mitta pitkin linjaa A→B pisteestä A, b-mitta "
+                   "kohtisuoraan: + oikealle (A:sta B:hen katsottuna), − vasemmalle.")
+        valinnat = {f"Piste {nimi} ({koodi or '-'})": (e, n, z, str(nimi)) for nimi, koodi, e, n, z in kohteet}
+        for v in sl_tulos["viivat"]:
+            for j, k in enumerate(v["karjet"]):
+                valinnat[f"{v['nimi']}: kärki {j + 1} ({k.get('nimi')})"] = (k["e"], k["n"], k.get("z"), None)
+        nimet = list(valinnat)
+        if len(nimet) < 2:
+            st.caption("Pisteitä on liian vähän.")
+            return
+        sarakkeet = st.columns(2)
+        a_nimi = sarakkeet[0].selectbox("Piste A", nimet, key="sl_suora_a")
+        b_nimi = sarakkeet[1].selectbox("Piste B", nimet, index=1, key="sl_suora_b")
+        toiminto = st.radio("Toiminto", ["Uusi kärki viivaan", "Uusi viiva A→B siirrettynä b-mitalla"],
+                            horizontal=True, key="sl_suora_toiminto")
+        sarakkeet = st.columns(2)
+        a_mitta = sarakkeet[0].number_input("a-mitta (m)", value=0.0, step=0.01, format="%.3f", key="sl_suora_amitta",
+                                            disabled=toiminto != "Uusi kärki viivaan")
+        b_mitta = sarakkeet[1].number_input("b-mitta (m)", value=0.0, step=0.01, format="%.3f", key="sl_suora_bmitta")
+        A, B = valinnat[a_nimi], valinnat[b_nimi]
+        try:
+            if toiminto == "Uusi kärki viivaan":
+                e, n = sl.suorakulmainen_piste(A[:2], B[:2], a_mitta, b_mitta)
+                st.caption(f"Laskettu piste: E {e:.3f}  N {n:.3f}")
+                viivanimet = [v["nimi"] for v in sl_tulos["viivat"]]
+                sarakkeet = st.columns(2)
+                kohde = sarakkeet[0].selectbox("Viiva", viivanimet,
+                                               index=viivanimet.index(valittu) if valittu in viivanimet else 0,
+                                               key="sl_suora_viiva")
+                karjet = next(v for v in sl_tulos["viivat"] if v["nimi"] == kohde)["karjet"]
+                kohdat = ["alkuun"] + [f"kärjen {j + 1} ({k.get('nimi')}) jälkeen" for j, k in enumerate(karjet)]
+                kohta = sarakkeet[1].selectbox("Kohta", kohdat, index=len(kohdat) - 1, key="sl_suora_kohta")
+                if st.button("Lisää kärki", key="sl_suora_lisaa"):
+                    tila["muokkaukset"].append({"tyyppi": "lisaa", "viiva": kohde, "jalkeen": kohdat.index(kohta) - 1,
+                                                "e": round(e, 3), "n": round(n, 3), "z": None,
+                                                "nimi": f"a{a_mitta:g} b{b_mitta:g}", "laji": "laskettu"})
+                    st.rerun()
+            else:
+                alku = sl.suorakulmainen_piste(A[:2], B[:2], 0.0, b_mitta)
+                loppu = sl.suorakulmainen_piste(A[:2], B[:2], ((B[0] - A[0]) ** 2 + (B[1] - A[1]) ** 2) ** 0.5, b_mitta)
+                st.caption(f"Viiva: E {alku[0]:.3f} N {alku[1]:.3f} → E {loppu[0]:.3f} N {loppu[1]:.3f}")
+                if st.button("Lisää viiva", key="sl_suora_viiva_lisaa"):
+                    uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "uusi_viiva")
+                    tila["muokkaukset"].append({
+                        "tyyppi": "uusi_viiva", "nimi": f"Lisätty viiva {uusia + 1}",
+                        "pohja": valittu or sl_tulos["viivat"][0]["nimi"],
+                        "karjet": [{"e": round(x, 3), "n": round(y, 3), "z": None, "nimi": f"b{b_mitta:g}",
+                                    "laji": "laskettu"} for x, y in (alku, loppu)]})
+                    st.rerun()
+        except ValueError as e:
+            st.warning(str(e))
+
+
 def _seinalinjan_lidar():
     """Seinälinja-osioon ladatun LiDAR-seinien DXF:n (lidarpipen _seinat.dxf) janat:
     ({"SEINA": [...], "EPAVARMA": [...]} tai None, virheteksti tai None). Luetaan
@@ -640,6 +728,10 @@ if ladattu_tiedosto is not None and raportti:
             kartan_seinalinja = (jx.muodosta_seinalinja(kaikki_pisteet, kantakartta=kaytetty_kantakartta,
                                                         lidar=sl_lidar_seinat, lidar_paatelty=sl_lidar_paatelty)
                                  if raportti.get("seinalinja_kaytettavissa") else None)
+            if kartan_seinalinja:
+                kk_tila = _seinalinjan_muokkaukset(raaka_bytes)
+                if kk_tila["muokkaukset"] and kk_tila["pohja"] == sl.viivojen_tunniste(kartan_seinalinja):
+                    kartan_seinalinja = sl.sovella_muokkaukset(kartan_seinalinja, kk_tila["muokkaukset"])
             kartta = hk.luo_jobxml_interaktiivinen_kartta(kaikki_pisteet, kartan_seinalinja,
                                                           api_key=hk.MML_API_KEY)
             if kartta is not None:
@@ -701,6 +793,16 @@ if ladattu_tiedosto is not None and raportti:
                     kaikki_pisteet, tapa={"Automaattinen": "lyhin", "Mittausjärjestys": "mittaus"}.get(seinalinja_tapa, "lyhin_vanha"),
                     kantakartta=kaytetty_kantakartta, lidar=sl_lidar_seinat, lidar_paatelty=sl_lidar_paatelty,
                 )
+                # Käsin tehdyt muokkaukset (muokkauskartta) automaattisen viivan päälle; jos automaattinen
+                # viiva muuttuu (järjestys, kantakartta, LiDAR), muokkaukset eivät enää päde
+                sl_tila = _seinalinjan_muokkaukset(raaka_bytes)
+                sl_pohja = sl.viivojen_tunniste(sl_tulos)
+                if sl_tila["pohja"] != sl_pohja:
+                    if sl_tila["muokkaukset"]:
+                        st.info("Automaattinen seinälinja muuttui (järjestys, kantakartta tai LiDAR), joten käsin "
+                                "tehdyt muokkaukset nollattiin.")
+                    sl_tila.update(pohja=sl_pohja, muokkaukset=[])
+                sl_tulos = sl.sovella_muokkaukset(sl_tulos, sl_tila["muokkaukset"])
                 if kaytetty_kantakartta:
                     riskit = sl.kantakartan_riskit(kaytetty_kantakartta, kaikki_pisteet)
                     if riskit:
@@ -735,18 +837,24 @@ if ladattu_tiedosto is not None and raportti:
                                           horizontal=True, key="seinalinja_rajaus")
                     if sl_valinta != "Kaikki viivat":
                         sl_valittu = sl_valinta
-                try:
-                    sl_kartta = hk.luo_seinalinja_interaktiivinen_kartta(sl_tulos, api_key=hk.MML_API_KEY,
-                                                                          viiva=sl_valittu, lidar=sl_lidar,
-                                                                          poikkeamat_lidar=sl_poikkeamat_lidar)
-                    if sl_kartta is not None:
-                        st.caption("Zoomaa hiirellä tai +/- napeista. Pisteestä saa koordinaatit klikkaamalla.")
-                        # returned_objects=[] -> zoomaus ei aja sovellusta uudelleen; avain rajauksen
-                        # mukaan, jotta kartta rajataan uudelleen valinnan vaihtuessa
-                        st_folium(sl_kartta, height=650, use_container_width=True, returned_objects=[],
-                                  key=f"seinalinja_kartta_{sl_valittu}")
-                except Exception as karttavirhe:
-                    st.caption(f"Zoomattavaa seinälinjakarttaa ei voitu piirtää ({karttavirhe}).")
+                if st.toggle("Muokkaa viivaa kartalla", key="seinalinja_muokkaa",
+                             help="Kärkien raahaus, napsautus mitattuun pisteeseen, uusi kärki, poisto ja "
+                                  "suorakulmainen mittaus. Muokattu viiva menee taulukkoon, DXF:ään, PNG:hen ja "
+                                  "kantaan."):
+                    _seinalinjan_muokkaus(sl_tulos, sl_tila, kaikki_pisteet, sl_valittu, sl_helsingissa)
+                else:
+                    try:
+                        sl_kartta = hk.luo_seinalinja_interaktiivinen_kartta(sl_tulos, api_key=hk.MML_API_KEY,
+                                                                              viiva=sl_valittu, lidar=sl_lidar,
+                                                                              poikkeamat_lidar=sl_poikkeamat_lidar)
+                        if sl_kartta is not None:
+                            st.caption("Zoomaa hiirellä tai +/- napeista. Pisteestä saa koordinaatit klikkaamalla.")
+                            # returned_objects=[] -> zoomaus ei aja sovellusta uudelleen; avain rajauksen
+                            # mukaan, jotta kartta rajataan uudelleen valinnan vaihtuessa
+                            st_folium(sl_kartta, height=650, use_container_width=True, returned_objects=[],
+                                      key=f"seinalinja_kartta_{sl_valittu}")
+                    except Exception as karttavirhe:
+                        st.caption(f"Zoomattavaa seinälinjakarttaa ei voitu piirtää ({karttavirhe}).")
 
                 # PNG tehdään vain pyydettäessä, koska taustakuva haetaan WMS:stä joka kerta.
                 if st.button("Luo seinälinja PNG-kuvana", key="seinalinja_png"):
@@ -771,8 +879,9 @@ if ladattu_tiedosto is not None and raportti:
 
                 sl_dxf = sl.kirjoita_dxf(sl_tulos, os.path.join(tmp_sl_dir, "seinalinja.dxf"))
                 with open(sl_dxf, "rb") as f:
-                    st.download_button("Lataa seinälinja (DXF)", f,
-                                       file_name=f"seinalinja_{raportti['job_nimi']}.dxf",
+                    st.download_button("Lataa seinälinja (DXF)" + (" (muokattu)" if sl_tulos.get("muokattu") else ""), f,
+                                       file_name=f"seinalinja_{raportti['job_nimi']}"
+                                                 f"{'_muokattu' if sl_tulos.get('muokattu') else ''}.dxf",
                                        mime="application/dxf")
             except Exception as sl_virhe:
                 st.error(f"Seinälinjan muodostus epäonnistui: {sl_virhe}")

@@ -206,6 +206,43 @@ def test_mittausten_tallennus_vie_seinalinjan(monkeypatch):
                and "2 asemapistettä" in s.value for s in at.success)
 
 
+def test_seinalinjan_muokkaus_dxf_ja_tallennus(monkeypatch):
+    """Muokkauskartta päälle ei kaada; käsin tehty muokkaus (istunnossa) näkyy DXF-napissa ja menee
+    tallennukseen."""
+    import hashlib
+
+    import jobxml_tuonti as jx
+    import seinalinja as sl
+
+    viivat = mock.Mock(return_value=1)
+    for nimi in ("tallenna_mittaukset_kantaan", "tallenna_raportti_kantaan"):
+        monkeypatch.setattr(jx, nimi, mock.Mock(return_value=1))
+    monkeypatch.setattr(jx, "tallenna_seinalinjat_kantaan", viivat)
+    tiedosto = _testi2(monkeypatch)
+    at = sovellus()
+    with ladattu_tiedosto("jobxml_tiedosto", tiedosto):
+        at.run()
+        [t for t in at.toggle if t.label == "Muokkaa viivaa kartalla"][0].set_value(True).run()
+        assert not virheet(at), virheet(at)
+        assert any(b.label == "Lisää kärki" for b in at.button)
+        avain = "_sl_muokkaukset_" + hashlib.sha1(tiedosto.getvalue()).hexdigest()
+        tila = at.session_state[avain]
+        viiva = jx.muodosta_seinalinja(jx.jasenna_tyo(tiedosto.getvalue(), "testi2.jxl")[1])["viivat"][0]
+        k = viiva["karjet"][0]
+        tila["muokkaukset"].append({"tyyppi": "siirra", "viiva": viiva["nimi"], "karki": 0, "e": k["e"] + 0.5,
+                                    "n": k["n"], "z": None, "nimi": None})
+        at.session_state[avain] = tila
+        at.run()
+        assert not virheet(at), virheet(at)
+        assert any(b.label == "Lataa seinälinja (DXF) (muokattu)" for b in at.get("download_button"))
+        assert any("kärki 1 siirretty" in c.value for c in at.caption)
+        [b for b in at.button if b.label == "Tallenna mittaukset kantaan"][0].click().run()
+    tallennettu = viivat.call_args[0][1]
+    assert tallennettu["muokattu"]
+    assert tallennettu["viivat"][0]["karjet"][0]["e"] == pytest.approx(k["e"] + 0.5)
+    assert sl.viivojen_tunniste(tallennettu) != sl.viivojen_tunniste({"viivat": [viiva]})
+
+
 def test_tallennetut_raportit(monkeypatch):
     import datetime
     import jobxml_tuonti as jx

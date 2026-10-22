@@ -849,3 +849,56 @@ def test_kohdekoodit_dxf_tasoille(tmp_path):
     assert any(t.dxf.text == "A1 (RAK 5)" for t in msp.query("TEXT"))
     assert sl.dxf_taso(("", (), 2)) == "SEINALINJA"
     assert sl.dxf_taso(("RAK", ("Sokkeli: vanha",), 1)) == "SEINALINJA_RAK_SOKKELI__VANHA"
+
+
+# --- Käsin tehdyt muokkaukset (muokkauskartta) ----------------------------------
+
+def _neliö():
+    pisteet = [piste("1", "8", 0, 0), piste("2", "5", 10, 0), piste("3", "5", 10, 8), piste("4", "5", 0, 8)]
+    return sl.muodosta_seinalinjat(pisteet)
+
+
+def test_suorakulmainen_piste_etumerkit():
+    # A→B itään: + oikealle = etelään; A→B pohjoiseen: + oikealle = itään
+    assert sl.suorakulmainen_piste((0, 0), (10, 0), 2, 1) == pytest.approx((2, -1))
+    assert sl.suorakulmainen_piste((0, 0), (0, 10), 2, -1) == pytest.approx((-1, 2))
+    assert sl.suorakulmainen_piste((E0, N0), (E0 + 3, N0 + 4), 5, 0) == pytest.approx((E0 + 3, N0 + 4))
+    with pytest.raises(ValueError):
+        sl.suorakulmainen_piste((1, 1), (1, 1), 1, 1)
+
+
+def test_sovella_muokkaukset_siirto_lisays_poisto():
+    tulos = _neliö()
+    viiva = tulos["viivat"][0]["nimi"]
+    alku = karjet_xy(tulos["viivat"][0])
+    muokkaukset = [
+        {"tyyppi": "siirra", "viiva": viiva, "karki": 1, "e": E0 + 10.5, "n": N0, "z": 9.0, "nimi": "99"},
+        {"tyyppi": "lisaa", "viiva": viiva, "jalkeen": 0, "e": E0 + 5, "n": N0 - 1, "z": None, "nimi": None},
+        {"tyyppi": "poista", "viiva": viiva, "karki": 4},
+    ]
+    uusi = sl.sovella_muokkaukset(tulos, muokkaukset)
+    assert karjet_xy(tulos["viivat"][0]) == alku            # alkuperäinen ennallaan
+    karjet = uusi["viivat"][0]["karjet"]
+    assert [(round(k["e"] - E0, 3), round(k["n"] - N0, 3)) for k in karjet] == [(0, 0), (5, -1), (10.5, 0), (10, 8)]
+    assert (karjet[1]["laji"], karjet[2]["laji"], karjet[2]["nimi"], karjet[2]["z"]) == ("käsin", "mitattu", "99", 9.0)
+    assert uusi["muokattu"] and uusi["viivat"][0]["suljettu"]
+    assert sl.viivojen_tunniste(uusi) != sl.viivojen_tunniste(tulos)
+
+
+def test_sovella_muokkaukset_uusi_viiva_ja_ohitus():
+    tulos = _neliö()
+    viiva = tulos["viivat"][0]["nimi"]
+    uusi = sl.sovella_muokkaukset(tulos, [
+        {"tyyppi": "uusi_viiva", "nimi": "Lisätty viiva 1", "pohja": viiva,
+         "karjet": [{"e": E0, "n": N0 + 1, "laji": "laskettu", "nimi": "b1"},
+                    {"e": E0 + 10, "n": N0 + 1, "laji": "laskettu", "nimi": "b1"}]},
+        {"tyyppi": "poista", "viiva": "ei ole", "karki": 0},
+        {"tyyppi": "siirra", "viiva": viiva, "karki": 17, "e": 0, "n": 0},
+    ])
+    lisatty = uusi["viivat"][-1]
+    assert lisatty["nimi"] == "Lisätty viiva 1" and not lisatty["suljettu"] and len(lisatty["karjet"]) == 2
+    assert lisatty["avain"] == tulos["viivat"][0]["avain"]       # sama DXF-taso
+    assert sum("Muokkaus ohitettiin" in v for v in uusi["varoitukset"]) == 2
+    # viivaan ei jätetä alle kahta kärkeä
+    kaksi = sl.sovella_muokkaukset(uusi, [{"tyyppi": "poista", "viiva": "Lisätty viiva 1", "karki": 0}])
+    assert len(kaksi["viivat"][-1]["karjet"]) == 2

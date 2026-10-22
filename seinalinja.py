@@ -2171,3 +2171,82 @@ def kirjoita_dxf(tulos, out_path):
 
     doc.saveas(out_path)
     return out_path
+
+
+# ---------------------------------------------------------------------------
+# Käsin tehdyt muokkaukset (sovelluksen seinälinjan muokkauskartta)
+# ---------------------------------------------------------------------------
+
+def suorakulmainen_piste(a, b, a_mitta, b_mitta):
+    """Suorakulmainen mittaus: piste (e, n) = A + a_mitta pitkin A→B + b_mitta kohtisuoraan,
+    + oikealle (katsottuna A:sta B:hen). a ja b = (e, n)."""
+    de, dn = b[0] - a[0], b[1] - a[1]
+    pituus = math.hypot(de, dn)
+    if pituus < 1e-9:
+        raise ValueError("Pisteet A ja B ovat samassa kohdassa, suuntaa ei voi laskea.")
+    ue, un = de / pituus, dn / pituus
+    return (a[0] + a_mitta * ue + b_mitta * un, a[1] + a_mitta * un - b_mitta * ue)
+
+
+def viivojen_tunniste(tulos):
+    """Viivojen nimet ja kärjet pyöristettynä: automaattisen viivan muuttuminen (järjestys, kantakartta,
+    LiDAR) havaitaan tästä, jolloin sen päälle tehdyt muokkaukset eivät enää päde."""
+    return tuple((v["nimi"], v["suljettu"], tuple((round(k["e"], 3), round(k["n"], 3)) for k in v["karjet"]))
+                 for v in tulos.get("viivat", []))
+
+
+def sovella_muokkaukset(tulos, muokkaukset):
+    """Seinälinja käsin tehtyjen muokkausten jälkeen (uusi tulos, alkuperäinen ennallaan). Muokkaukset
+    järjestyksessä, kukin viittaa edellisten jälkeiseen tilaan:
+      {"tyyppi": "siirra", "viiva", "karki", "e", "n", "z", "nimi"} -- kärki uuteen paikkaan (nimi =
+          pisteen nimi, jos kärki napsautettiin mitattuun pisteeseen; muuten None = käsin)
+      {"tyyppi": "lisaa", "viiva", "jalkeen", "e", "n", "z", "nimi", "laji"} -- uusi kärki kärjen
+          "jalkeen" jälkeen (-1 = alkuun); jaettu jana muuttuu suoraksi
+      {"tyyppi": "poista", "viiva", "karki"}
+      {"tyyppi": "uusi_viiva", "nimi", "pohja", "karjet": [{"e", "n", "z", "nimi", "laji"}]} -- avoin viiva
+          viivan "pohja" tasolle (DXF ja kanta)
+    Muokkaus, joka ei enää osu (viiva tai kärki puuttuu), ohitetaan ja siitä tulee varoitus."""
+    import copy
+
+    uusi = copy.deepcopy(tulos)
+    uusi["varoitukset"] = list(uusi.get("varoitukset", []))
+    viivat = {v["nimi"]: v for v in uusi["viivat"]}
+
+    def karki(m, laji):
+        return {"e": m["e"], "n": m["n"], "z": m.get("z"), "laji": laji, "nimi": m.get("nimi") or laji,
+                "bulge": 0.0}
+
+    for m in muokkaukset:
+        tyyppi = m.get("tyyppi")
+        if tyyppi == "uusi_viiva":
+            pohja = viivat.get(m.get("pohja")) or (uusi["viivat"][0] if uusi["viivat"] else None)
+            viiva = {"nimi": m["nimi"], "karjet": [dict(karki(k, k.get("laji") or "laskettu")) for k in m["karjet"]],
+                     "suljettu": False, "numero": None,
+                     "avain": pohja["avain"] if pohja else ("", (), 1)}
+            uusi["viivat"].append(viiva)
+            viivat[viiva["nimi"]] = viiva
+            continue
+        viiva = viivat.get(m.get("viiva"))
+        karjet = viiva["karjet"] if viiva else None
+        if karjet is None:
+            uusi["varoitukset"].append(f"Muokkaus ohitettiin: viivaa {m.get('viiva')} ei ole.")
+            continue
+        if tyyppi == "siirra" and 0 <= m.get("karki", -1) < len(karjet):
+            k = karjet[m["karki"]]
+            k.update(e=m["e"], n=m["n"], laji="mitattu" if m.get("nimi") else "käsin",
+                     nimi=m.get("nimi") or k["nimi"])
+            if m.get("z") is not None:
+                k["z"] = m["z"]
+        elif tyyppi == "lisaa" and -1 <= m.get("jalkeen", -2) < len(karjet):
+            if m["jalkeen"] >= 0:
+                karjet[m["jalkeen"]]["bulge"] = 0.0
+            karjet.insert(m["jalkeen"] + 1, karki(m, m.get("laji") or ("mitattu" if m.get("nimi") else "käsin")))
+        elif tyyppi == "poista" and 0 <= m.get("karki", -1) < len(karjet) and len(karjet) > 2:
+            if m["karki"] > 0:
+                karjet[m["karki"] - 1]["bulge"] = 0.0
+            karjet.pop(m["karki"])
+        else:
+            uusi["varoitukset"].append(f"Muokkaus ohitettiin: {viiva['nimi']}: kärkeä ei ole tai viivaan jäisi alle "
+                                       "kaksi kärkeä.")
+    uusi["muokattu"] = bool(muokkaukset)
+    return uusi
