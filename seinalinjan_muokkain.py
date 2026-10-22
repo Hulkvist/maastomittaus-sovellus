@@ -27,6 +27,10 @@ _CSS = """
 .slm-nimi { background: transparent; border: none; box-shadow: none; font-size: 11px; color: #333;
             padding: 0; text-shadow: 0 0 3px #fff, 0 0 3px #fff; }
 .slm-nimi::before { display: none; }
+.slm-piirto { background: #fff; padding: 4px; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+.slm-piirto button { font-size: 13px; margin: 0 2px; padding: 3px 8px; cursor: pointer; }
+.slm-piirto .slm-ohje { font-size: 12px; margin: 4px 2px 0; color: #333; max-width: 260px; }
+.slm-piirtaa { cursor: crosshair !important; }
 """
 
 _JS = """
@@ -41,6 +45,69 @@ async function lataaLeaflet() {
   }
   if (!window.__slmLeaflet) window.__slmLeaflet = import(LEAFLET + "/leaflet-src.esm.js");
   return await window.__slmLeaflet;
+}
+
+// Uuden viivan piirto: nappi kartan kulmassa; klikkaukset lisäävät kärkiä (napsahtavat pisteisiin),
+// tuplaklikkaus tai Valmis lopettaa, ensimmäisen kärjen klikkaus sulkee viivan, Esc peruuttaa.
+function luoPiirto(L, tila) {
+  const { kartta } = tila;
+  const taso = L.layerGroup().addTo(kartta);
+  const piirto = tila.piirto = { paalla: false, karjet: [] };
+  const ohjain = L.control({ position: "topleft" });
+  ohjain.onAdd = () => {
+    const div = L.DomUtil.create("div", "slm-piirto");
+    div.innerHTML = '<button data-t="aloita">✏ Uusi viiva</button>'
+      + '<button data-t="valmis" style="display:none">Valmis</button>'
+      + '<button data-t="peruuta" style="display:none">Peruuta</button>'
+      + '<div class="slm-ohje" style="display:none">Klikkaa pisteitä järjestyksessä (napsahtaa pisteeseen). '
+      + 'Tuplaklikkaus tai Valmis lopettaa, ensimmäisen pisteen klikkaus sulkee viivan, Esc peruuttaa.</div>';
+    L.DomEvent.disableClickPropagation(div);
+    div.querySelector('[data-t="aloita"]').onclick = () => aseta(true);
+    div.querySelector('[data-t="valmis"]').onclick = () => piirto.valmis();
+    div.querySelector('[data-t="peruuta"]').onclick = () => aseta(false);
+    piirto.div = div;
+    return div;
+  };
+  ohjain.addTo(kartta);
+
+  function aseta(paalla) {
+    piirto.paalla = paalla;
+    piirto.karjet = [];
+    taso.clearLayers();
+    piirto.div.querySelector('[data-t="aloita"]').style.display = paalla ? "none" : "";
+    for (const t of ["valmis", "peruuta"]) piirto.div.querySelector(`[data-t="${t}"]`).style.display = paalla ? "" : "none";
+    piirto.div.querySelector(".slm-ohje").style.display = paalla ? "" : "none";
+    kartta.getContainer().classList.toggle("slm-piirtaa", paalla);
+    tila.ryhma.eachLayer((l) => { if (l.dragging) paalla ? l.dragging.disable() : l.dragging.enable(); });
+  }
+
+  function piirra() {
+    taso.clearLayers();
+    const ll = piirto.karjet.map((k) => k.ll);
+    if (ll.length > 1) L.polyline(ll, { color: "#d62728", weight: 3, dashArray: "6 6" }).addTo(taso);
+    for (const p of ll) L.circleMarker(p, { radius: 5, color: "#d62728", fillOpacity: 1 }).addTo(taso);
+  }
+
+  piirto.lisaa = (ll, sijainti) => {
+    const k = piirto.karjet;
+    const p = kartta.latLngToContainerPoint(ll);
+    if (k.length >= 3 && p.distanceTo(kartta.latLngToContainerPoint(k[0].ll)) < 3) { piirto.valmis(true); return; }
+    if (k.length && p.distanceTo(kartta.latLngToContainerPoint(k[k.length - 1].ll)) < 3) return;  // tuplaklikkaus
+    k.push({ ll, sijainti });
+    piirra();
+  };
+
+  piirto.valmis = (suljettu = false) => {
+    if (piirto.karjet.length >= 2) {
+      tila.setTriggerValue("muokkaus", { tyyppi: "uusi_viiva", suljettu,
+                                         karjet: piirto.karjet.map((k) => k.sijainti) });
+    }
+    aseta(false);
+  };
+
+  kartta.on("click", (e) => { if (piirto.paalla) piirto.lisaa(...tila.piirtokohta(e.latlng)); });
+  kartta.on("dblclick", (e) => { if (piirto.paalla) { L.DomEvent.stop(e); piirto.valmis(); } });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && piirto.paalla) aseta(false); });
 }
 
 export default async function (component) {
@@ -67,9 +134,11 @@ export default async function (component) {
     L.control.scale({ imperial: false }).addTo(kartta);
     const ryhma = L.layerGroup().addTo(kartta);
     tila = parentElement.__slm = { kartta, ryhma, rajattu: null };
+    luoPiirto(L, tila);
   }
   const { kartta, ryhma } = tila;
   ryhma.clearLayers();
+  tila.setTriggerValue = setTriggerValue;
 
   const pisteet = data.pisteet;   // [lat, lon, nimi, koodi]
   // Napsahduskohteet: mitatut pisteet ja kaikkien viivojen kärjet
@@ -93,12 +162,22 @@ export default async function (component) {
     if (!k) return { lat: ll.lat, lon: ll.lng };
     return k.piste !== undefined ? { piste: k.piste } : { kohde_viiva: k.viiva, kohde_karki: k.karki };
   }
+  // Piirtotilan klikkaus: [näytettävä sijainti, sijainti Pythonille]; napsahtaa lähimpään kohteeseen
+  tila.piirtokohta = (ll) => {
+    const k = lahin(ll);
+    return [k ? k.ll : ll, sijainti(ll)];
+  };
 
-  for (const p of pisteet) {
+  pisteet.forEach((p, i) => {
     L.circleMarker([p[0], p[1]], { radius: 4, color: "#1f77b4", weight: 1, fillOpacity: 0.9 })
       .bindTooltip(String(p[2]), { permanent: true, direction: "right", className: "slm-nimi", offset: [4, 0] })
+      .on("click", (e) => {
+        if (!tila.piirto.paalla) return;
+        L.DomEvent.stop(e);
+        tila.piirto.lisaa(L.latLng(p[0], p[1]), { piste: i });
+      })
       .addTo(ryhma);
-  }
+  });
 
   const kaikki = [];
   for (const v of data.viivat) {
@@ -123,10 +202,12 @@ export default async function (component) {
     // Klikkaus viivalle: uusi kärki; oikea klikkaus: jana pois
     viiva.on("click", (e) => {
       L.DomEvent.stopPropagation(e);
+      if (tila.piirto.paalla) { tila.piirto.lisaa(...tila.piirtokohta(e.latlng)); return; }
       setTriggerValue("muokkaus", { tyyppi: "lisaa", viiva: v.nimi, jalkeen: lahinJana(e.latlng), ...sijainti(e.latlng) });
     });
     viiva.on("contextmenu", (e) => {
       L.DomEvent.stop(e);
+      if (tila.piirto.paalla) return;
       setTriggerValue("muokkaus", { tyyppi: "poista_jana", viiva: v.nimi, jana: lahinJana(e.latlng) });
     });
     v.karjet.forEach((k, j) => {
@@ -143,9 +224,19 @@ export default async function (component) {
         setTriggerValue("muokkaus", { tyyppi: "siirra", viiva: v.nimi, karki: j,
                                       ...sijainti(ll, { viiva: v.nimi, karki: j }) });
       });
-      const poista = (e) => { L.DomEvent.stop(e); setTriggerValue("muokkaus", { tyyppi: "poista", viiva: v.nimi, karki: j }); };
+      const poista = (e) => {
+        L.DomEvent.stop(e);
+        if (tila.piirto.paalla) { if (e.type === "dblclick") tila.piirto.valmis(); return; }
+        setTriggerValue("muokkaus", { tyyppi: "poista", viiva: v.nimi, karki: j });
+      };
       m.on("dblclick", poista);
       m.on("contextmenu", poista);
+      m.on("click", (e) => {
+        if (!tila.piirto.paalla) return;
+        L.DomEvent.stop(e);
+        tila.piirto.lisaa(L.latLng(k[0], k[1]), { kohde_viiva: v.nimi, kohde_karki: j });
+      });
+      if (tila.piirto.paalla) m.dragging.disable();
     });
   }
   // Rajaus aluksi ja kun valittu viiva vaihtuu; muuten näkymä säilyy
@@ -219,21 +310,32 @@ def _3879(lat, lon):
     return Transformer.from_crs("EPSG:4326", f"EPSG:{hk.DB_SRID}", always_xy=True).transform(lon, lat)
 
 
-def muokkaukseksi(tapahtuma, tulos, kohteet):
-    """Kartan tapahtuma seinalinja.sovella_muokkaukset()-muokkaukseksi EPSG:3879:ssä."""
+def _koordinaatit(sijainti, tulos, kohteet):
+    """Kartan sijainti (mitattu piste, viivan kärki tai lat/lon) -> {"e", "n", "z", "nimi"} EPSG:3879:ssä."""
+    if sijainti.get("piste") is not None:
+        nimi, _, e, n, z = kohteet[int(sijainti["piste"])]
+        return {"e": e, "n": n, "z": z, "nimi": str(nimi)}
+    if sijainti.get("kohde_viiva") is not None:
+        viiva = next(v for v in tulos["viivat"] if v["nimi"] == sijainti["kohde_viiva"])
+        k = viiva["karjet"][int(sijainti["kohde_karki"])]
+        return {"e": k["e"], "n": k["n"], "z": k.get("z"), "nimi": str(k.get("nimi") or "")}
+    e, n = _3879(sijainti["lat"], sijainti["lon"])
+    return {"e": round(e, 3), "n": round(n, 3), "z": None, "nimi": None}
+
+
+def muokkaukseksi(tapahtuma, tulos, kohteet, uuden_nimi="Uusi viiva"):
+    """Kartan tapahtuma seinalinja.sovella_muokkaukset()-muokkaukseksi EPSG:3879:ssä. uuden_nimi = piirretyn
+    uuden viivan nimi."""
+    if tapahtuma["tyyppi"] == "uusi_viiva":
+        karjet = [_koordinaatit(s, tulos, kohteet) for s in tapahtuma["karjet"]]
+        for k in karjet:
+            k["laji"] = "mitattu" if k["nimi"] else "käsin"
+        return {"tyyppi": "uusi_viiva", "nimi": uuden_nimi, "suljettu": bool(tapahtuma.get("suljettu")),
+                "pohja": tulos["viivat"][0]["nimi"] if tulos["viivat"] else None, "karjet": karjet}
     m = {k: tapahtuma[k] for k in ("tyyppi", "viiva", "karki", "jalkeen", "jana") if k in tapahtuma}
     if m["tyyppi"] in ("poista", "poista_jana"):
         return m
-    if tapahtuma.get("piste") is not None:
-        nimi, _, e, n, z = kohteet[int(tapahtuma["piste"])]
-        m.update(e=e, n=n, z=z, nimi=str(nimi))
-    elif tapahtuma.get("kohde_viiva") is not None:
-        viiva = next(v for v in tulos["viivat"] if v["nimi"] == tapahtuma["kohde_viiva"])
-        k = viiva["karjet"][int(tapahtuma["kohde_karki"])]
-        m.update(e=k["e"], n=k["n"], z=k.get("z"), nimi=str(k.get("nimi") or ""))
-    else:
-        e, n = _3879(tapahtuma["lat"], tapahtuma["lon"])
-        m.update(e=round(e, 3), n=round(n, 3), z=None, nimi=None)
+    m.update(_koordinaatit(tapahtuma, tulos, kohteet))
     return m
 
 
@@ -250,5 +352,5 @@ def kuvaus(m):
     if m["tyyppi"] == "poista_jana":
         return f"{m['viiva']}: jana kärjestä {m['jana'] + 1} seuraavaan poistettu"
     if m["tyyppi"] == "uusi_viiva":
-        return f"{m['nimi']}: uusi viiva ({len(m['karjet'])} kärkeä)"
+        return f"{m['nimi']}: uusi {'suljettu ' if m.get('suljettu') else ''}viiva ({len(m['karjet'])} kärkeä)"
     return str(m)

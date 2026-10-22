@@ -41,3 +41,19 @@ def test_vapaa_siirto_latlonista():
     assert (m["e"], m["n"]) == pytest.approx((E0 + 3.0, N0 + 4.0), abs=0.002) and m["nimi"] is None
     assert slm.muokkaukseksi({"tyyppi": "poista", "viiva": "x", "karki": 1}, tulos, []) == \
         {"tyyppi": "poista", "viiva": "x", "karki": 1}
+
+
+def test_piirretty_uusi_viiva():
+    tulos, pisteet = _tulos()
+    kohteet = slm.napsahduspisteet(pisteet)
+    lat, lon = hk._latlon_muunnin()(E0 + 20.0, N0 + 1.0)
+    m = slm.muokkaukseksi({"tyyppi": "uusi_viiva", "suljettu": True,
+                           "karjet": [{"piste": 0}, {"kohde_viiva": tulos["viivat"][0]["nimi"], "kohde_karki": 1},
+                                      {"lat": lat, "lon": lon}]}, tulos, kohteet, "Uusi viiva 1")
+    assert m["nimi"] == "Uusi viiva 1" and m["suljettu"]
+    assert [k["laji"] for k in m["karjet"]] == ["mitattu", "mitattu", "käsin"]
+    assert (m["karjet"][0]["e"], m["karjet"][0]["nimi"]) == (E0, "1")
+    assert m["karjet"][2]["e"] == pytest.approx(E0 + 20.0, abs=0.002)
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    assert uusi["viivat"][-1]["suljettu"] and len(uusi["viivat"][-1]["karjet"]) == 3
+    assert "uusi suljettu viiva (3 kärkeä)" in slm.kuvaus(m)

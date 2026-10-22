@@ -561,11 +561,13 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     st.caption("Raahaa kärkeä hiirellä: se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen, kun se on "
                "lähellä (kärki muuttuu vihreäksi). Klikkaa viivaa = uusi kärki, oikea klikkaus viivaan = poista "
                "jana. Tuplaklikkaa (tai oikea klikkaus) kärkeä = poista kärki. Punainen kärki = laskettu kulma, "
-               "oranssi = käsin siirretty. Taustakartan voi vaihtaa oikeasta yläkulmasta.")
+               "oranssi = käsin siirretty. Uuden viivan saa kartan vasemman yläkulman napista ✏ Uusi viiva. "
+               "Taustakartan voi vaihtaa oikeasta yläkulmasta.")
     tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu)
     if tapahtuma:
         try:
-            tila["muokkaukset"].append(slm.muokkaukseksi(tapahtuma, sl_tulos, kohteet))
+            uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "uusi_viiva" and m["nimi"].startswith("Uusi"))
+            tila["muokkaukset"].append(slm.muokkaukseksi(tapahtuma, sl_tulos, kohteet, f"Uusi viiva {uusia + 1}"))
         except Exception as e:
             st.error(f"Muokkausta ei voitu tehdä: {e}")
         else:

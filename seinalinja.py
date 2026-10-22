@@ -2206,8 +2206,8 @@ def sovella_muokkaukset(tulos, muokkaukset):
       {"tyyppi": "poista_jana", "viiva", "jana"} -- jana kärjestä "jana" seuraavaan pois: suljettu viiva
           aukeaa siitä kohdasta, avoin katkeaa kahdeksi viivaksi (toinen "... (osa 2)"); yhden janan viiva
           poistuu kokonaan
-      {"tyyppi": "uusi_viiva", "nimi", "pohja", "karjet": [{"e", "n", "z", "nimi", "laji"}]} -- avoin viiva
-          viivan "pohja" tasolle (DXF ja kanta)
+      {"tyyppi": "uusi_viiva", "nimi", "pohja", "karjet": [{"e", "n", "z", "nimi", "laji"}], "suljettu"} --
+          uusi viiva (suljettu vain, jos kärkiä on vähintään kolme) viivan "pohja" tasolle (DXF ja kanta)
     Muokkaus, joka ei enää osu (viiva tai kärki puuttuu), ohitetaan ja siitä tulee varoitus."""
     import copy
 
@@ -2224,7 +2224,7 @@ def sovella_muokkaukset(tulos, muokkaukset):
         if tyyppi == "uusi_viiva":
             pohja = viivat.get(m.get("pohja")) or (uusi["viivat"][0] if uusi["viivat"] else None)
             viiva = {"nimi": m["nimi"], "karjet": [dict(karki(k, k.get("laji") or "laskettu")) for k in m["karjet"]],
-                     "suljettu": False, "numero": None,
+                     "suljettu": bool(m.get("suljettu")) and len(m["karjet"]) >= 3, "numero": None,
                      "avain": pohja["avain"] if pohja else ("", (), 1)}
             uusi["viivat"].append(viiva)
             viivat[viiva["nimi"]] = viiva
