@@ -60,3 +60,25 @@ def test_ilman_aikaleimoja_jarjestys_sailyy():
     numerot = sorted(list(asemat.values()) + [t[2] for t in tiedot if t[2] and t[0] is None or
                                                (t[2] and t[2] not in asemat.values())])
     assert numerot == list(range(1, len(numerot) + 1))
+
+
+def test_mittaustiedot_takymetri_ja_rtk():
+    """Lisätiedot kentalla_mitatut_pisteet-tauluun: takymetrin prisma, vakio, korkeus, kulmat gooneina;
+    RTK:n antennikorkeus, tarkkuudet ja kallistus. Toisen mittaustavan sarakkeet tyhjiä."""
+    takymetri = {"havainto": {"ha_deg": 90.0, "va_deg": 88.2, "sd_m": 12.3, "kojeasento": "Face2",
+                              "tahyskorkeus_m": 1.5, "prismavakio_m": -0.0344, "tahys": "Prisma 1",
+                              "prismatyyppi": "TrimbleStandard"},
+                 "kahdesta_kojeasennosta": True,
+                 "ominaisuudet": [{"kohde": "RAK", "nimi": "Rakennetyyppi", "arvo": "Sokkeli", "tyyppi": "Menu"}]}
+    rtk = {"gnss": {"antennikorkeus": 2.0336, "kallistusetaisyys": 0.0116, "tukiaseman_ika_s": 1.0},
+           "tarkkuus_h": 0.0078, "tarkkuus_v": 0.0111, "hdop": 0.52, "vdop": 0.83}
+    t = dict(zip(jx.MITTAUSTIETOSARAKKEET, jx._mittaustiedot(takymetri)))
+    r = dict(zip(jx.MITTAUSTIETOSARAKKEET, jx._mittaustiedot(rtk)))
+    assert (t["prisma"], t["prismatyyppi"], t["prismavakio_mm"], t["tahyskorkeus_m"]) == \
+        ("Prisma 1", "TrimbleStandard", -34.4, 1.5)
+    assert (t["vaakakulma_gon"], t["pystykulma_gon"], t["kojeasento"], t["kahdesta_kojeasennosta"]) == \
+        (100.0, 98.0, "II", True)
+    assert t["ominaisuudet"] == "Rakennetyyppi: Sokkeli" and t["antennikorkeus_m"] is None
+    assert (r["antennikorkeus_m"], r["tarkkuus_vaaka_m"], r["kallistusetaisyys_m"], r["korjauksen_ika_s"]) == \
+        (2.0336, 0.0078, 0.0116, 1.0)
+    assert r["prisma"] is None and r["kahdesta_kojeasennosta"] is None

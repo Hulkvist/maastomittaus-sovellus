@@ -887,6 +887,7 @@ def _havainto(block, tahykset):
     return {"ha_deg": _poimi_float("HorizontalCircle", cb), "va_deg": _poimi_float("VerticalCircle", cb),
             "sd_m": _poimi_float("EDMDistance", cb), "kojeasento": _poimi("Face", cb),
             "tahyskorkeus_m": tahys.get("korkeus_m"), "prismavakio_m": tahys.get("prismavakio_m"),
+            "tahys": tahys.get("nimi"), "prismatyyppi": tahys.get("prismatyyppi"),
             "lukittu": _poimi("TargetLocked", block), "lukitustyyppi": _poimi("LockType", block)}
 
 
@@ -1507,6 +1508,32 @@ def mittausjarjestys(raportti, pisteet):
     return asemien, tiedot
 
 
+# Mittauksen lisätiedot kentalla_mitatut_pisteet-tauluun (sarake: arvo pisteestä). Kulmat gooneina
+# (JobXML: asteet), kojeasento I/II. Takymetrin sarakkeet ovat RTK-pisteillä tyhjiä ja päinvastoin.
+MITTAUSTIETOSARAKKEET = ("prisma", "prismatyyppi", "prismavakio_mm", "tahyskorkeus_m", "vaakakulma_gon",
+                         "pystykulma_gon", "kojeasento", "kahdesta_kojeasennosta", "antennikorkeus_m",
+                         "tarkkuus_vaaka_m", "tarkkuus_korkeus_m", "hdop", "vdop", "kallistusetaisyys_m",
+                         "korjauksen_ika_s", "ominaisuudet")
+
+
+def _mittaustiedot(p):
+    """Pisteen lisätiedot MITTAUSTIETOSARAKKEET-järjestyksessä."""
+    h = p.get("havainto") or {}
+    g = p.get("gnss") or {}
+
+    def gon(aste):
+        return None if aste is None else round(aste * 400.0 / 360.0, 6)
+
+    vakio = h.get("prismavakio_m")
+    asento = {"Face1": "I", "Face2": "II"}.get(h.get("kojeasento"), h.get("kojeasento"))
+    ominaisuudet = "; ".join(f"{o['nimi']}: {o['arvo']}" for o in p.get("ominaisuudet") or [] if o.get("arvo"))
+    return (h.get("tahys"), h.get("prismatyyppi"), None if vakio is None else round(vakio * 1000, 1),
+            h.get("tahyskorkeus_m"), gon(h.get("ha_deg")), gon(h.get("va_deg")), asento,
+            bool(p.get("kahdesta_kojeasennosta")) if h else None, g.get("antennikorkeus"),
+            p.get("tarkkuus_h"), p.get("tarkkuus_v"), p.get("hdop"), p.get("vdop"), g.get("kallistusetaisyys"),
+            g.get("tukiaseman_ika_s"), ominaisuudet or None)
+
+
 def tallenna_mittaukset_kantaan(kiinteistotunnus, pisteet, db_conn, raportti=None):
     """Pisteet kentalla_mitatut_pisteet-tauluun. raportti (jasenna_tyo()-tulos) antaa pisteille
     aseman ja mittausjärjestyksen (QGIS-animaatio); ilman sitä ne jäävät tyhjiksi."""
@@ -1525,13 +1552,14 @@ def tallenna_mittaukset_kantaan(kiinteistotunnus, pisteet, db_conn, raportti=Non
                 f"""INSERT INTO kentalla_mitatut_pisteet
                     (kiinteistotunnus, pistetunnus, kuvaus, mittaustapa, tarkkuusluokka,
                      vinoetaisyys, satelliitteja, pdop, korkeus, lahdetiedosto, mitattu, asema, asema_nro,
-                     jarjestys, geom)
+                     jarjestys, {", ".join(MITTAUSTIETOSARAKKEET)}, geom)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            {", ".join(["%s"] * len(MITTAUSTIETOSARAKKEET))},
                             ST_SetSRID(ST_MakePoint(%s, %s), {DB_SRID}));""",
                 (kiinteistotunnus, p["nimi"], p.get("kategoria"), p.get("mittaustapa"), p.get("koodi"),
                  (p.get("havainto") or {}).get("sd_m"), p.get("satelliitteja"), p.get("pdop"),
                  p.get("korkeus"), p.get("lahdetiedosto"), p.get("aikaleima"), asema, asema_nro, nro,
-                 p["e"], p["n"]),
+                 *_mittaustiedot(p), p["e"], p["n"]),
             )
             lisatty += 1
     return lisatty
