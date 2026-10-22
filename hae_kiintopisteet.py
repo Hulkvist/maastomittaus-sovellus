@@ -887,9 +887,15 @@ def tunnista_kiinteisto_pisteparvesta(pisteet, api_key, marginaali_m=5):
     return ehdotettu_tunnus, dict(osumat), len(pisteet_mukana)
 
 
-def hae_helsinki_kantakartta(bbox_3879, leveys_px=1200, korkeus_px=1200, layer=HELSINKI_KANTAKARTTA_LAYER):
-    from PIL import Image
+# Helsingin WMS:n tauko: jos haku aikakatkaistaan tai yhteys ei onnistu, seuraavat haut ohitetaan heti
+# WMS_TAUKO_S ajan (Streamlit Cloudin palvelin on ulkomailla ja yhteys kartta.hel.fi:hin voi takkuilla:
+# ilman taukoa jokainen asemapistekartta odottaisi aikarajan verran).
+WMS_TAUKO_S = 300
+_wms_tauko_asti = [0.0]
 
+
+@lru_cache(maxsize=64)
+def _hae_wms_kuva(bbox_3879, leveys_px, korkeus_px, layer, timeout):
     params = {
         "SERVICE": "WMS",
         "VERSION": "1.1.1",
@@ -902,15 +908,33 @@ def hae_helsinki_kantakartta(bbox_3879, leveys_px=1200, korkeus_px=1200, layer=H
         "HEIGHT": korkeus_px,
         "FORMAT": "image/png",
     }
-    resp = requests.get(HELSINKI_WMS_URL, params=params, timeout=60)
+    try:
+        resp = requests.get(HELSINKI_WMS_URL, params=params, timeout=timeout)
+    except (requests.Timeout, requests.ConnectionError):
+        _wms_tauko_asti[0] = time.time() + WMS_TAUKO_S
+        raise
     resp.raise_for_status()
     if "image" not in resp.headers.get("Content-Type", ""):
         raise RuntimeError(f"Helsingin WMS ei palauttanut kuvaa: {resp.text[:300]}")
-    return Image.open(io.BytesIO(resp.content))
+    return resp.content
+
+
+def hae_helsinki_kantakartta(bbox_3879, leveys_px=1200, korkeus_px=1200, layer=HELSINKI_KANTAKARTTA_LAYER,
+                             timeout=60):
+    """Helsingin kantakartta kuvana alueelta (WMS). Onnistuneet haut muistetaan (sama alue ei hae
+    uudelleen). Jos palvelu ei vastannut äsken (WMS_TAUKO_S), virhe tulee heti."""
+    from PIL import Image
+
+    if time.time() < _wms_tauko_asti[0]:
+        raise RuntimeError("Helsingin karttapalvelu ei vastannut äsken, tausta ohitetaan hetkeksi")
+    sisalto = _hae_wms_kuva(tuple(round(float(v), 3) for v in bbox_3879), leveys_px, korkeus_px, layer, timeout)
+    return Image.open(io.BytesIO(sisalto))
 
 
 def piirra_asemapisteen_pienikartta(asema_n, asema_e, liitospisteet, korkeusliitokset,
-                                     out_path, margin_m=15):
+                                     out_path, margin_m=15, tiedot=None):
+    """Asemapisteen pieni kartta PNG:ksi. tiedot (dict, valinnainen) saa avaimen "tausta": saatiinko
+    kantakartta taustalle."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -934,10 +958,14 @@ def piirra_asemapisteen_pienikartta(asema_n, asema_e, liitospisteet, korkeusliit
 
     try:
         kuva = hae_helsinki_kantakartta(bbox, leveys_px=500, korkeus_px=500,
-                                         layer=HELSINKI_KANTAKARTTA_HARMAA_LAYER)
+                                         layer=HELSINKI_KANTAKARTTA_HARMAA_LAYER, timeout=10)
         ax.imshow(kuva, extent=(bbox[0], bbox[2], bbox[1], bbox[3]), zorder=0)
+        if tiedot is not None:
+            tiedot["tausta"] = True
     except Exception as e:
         ax.set_facecolor("#e8e8e8")
+        if tiedot is not None:
+            tiedot["tausta"] = False
         print(f"Huom: Helsingin harmaakartan haku epäonnistui pienoiskartalle ({e}) -- jatketaan ilman taustaa.")
 
     horis_koords = [(p["e"], p["n"]) for p in liitospisteet if p.get("n") is not None and p.get("e") is not None]

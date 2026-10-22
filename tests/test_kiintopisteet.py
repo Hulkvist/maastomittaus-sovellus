@@ -87,3 +87,64 @@ def test_nimi_ja_koodi_ennen_koordinaatteja():
     """Sovelluksen oma kiintopisteet.txt (nimi koodi N E Z): tunnus on nimi, koodi toinen kenttä."""
     pisteet, _ = hk.jasenna_kiintopiste_txt(f"123 11 {N} {E} 1.0\nR7 {N} {E}\n")
     assert [(p["tunnus"], p["koodi"]) for p in pisteet] == [("123", "11"), ("R7", None)]
+
+
+def test_wms_aikakatkaisu_ohittaa_seuraavat_asemakartat(tmp_path, monkeypatch):
+    """Jos Helsingin WMS ei vastaa (Streamlit Cloudista yhteys voi takkuilla), vain ensimmäinen
+    asemapistekartta odottaa (10 s aikaraja); seuraavat piirretään heti ilman taustaa."""
+    import requests
+
+    import hae_kiintopisteet as hk
+    kutsut = []
+
+    def aikakatkaisu(*a, **k):
+        kutsut.append(k.get("timeout"))
+        raise requests.Timeout("aikakatkaisu")
+
+    monkeypatch.setattr(hk.requests, "get", aikakatkaisu)
+    monkeypatch.setattr(hk, "_wms_tauko_asti", [0.0])
+    hk._hae_wms_kuva.cache_clear()
+    for i in range(4):
+        assert hk.piirra_asemapisteen_pienikartta(6680630.0 + i, 25496280.0, [], [], str(tmp_path / f"a{i}.png"))
+    assert kutsut == [10]
+
+
+def test_asemakartta_muistetaan_pdf_varten(tmp_path, monkeypatch):
+    """Sama asema piirtyy sivulla ja PDF-raportissa: taustan kanssa piirretty kartta tulee toisella
+    kerralla muistista (ei uutta karttahakua); ilman taustaa jäänyt piirretään uudelleen."""
+    import io
+
+    import requests
+    from PIL import Image
+
+    import hae_kiintopisteet as hk
+    import jobxml_tuonti as jx
+    kutsut = []
+
+    def kuva(*a, **k):
+        kutsut.append(1)
+        b = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(b, "PNG")
+        return type("V", (), {"content": b.getvalue(), "headers": {"Content-Type": "image/png"},
+                              "raise_for_status": lambda self: None})()
+
+    monkeypatch.setattr(hk.requests, "get", kuva)
+    monkeypatch.setattr(hk, "_wms_tauko_asti", [0.0])
+    monkeypatch.setattr(jx, "_ASEMAKARTAT", {})
+    hk._hae_wms_kuva.cache_clear()
+    asema = {"n": 6680630.0, "e": 25496280.0, "liitospisteet_koordinaatit": [("1", 6680640.0, 25496290.0)]}
+    sivu = jx.piirra_asemapiste_kartta(asema, str(tmp_path / "sivu.png"))
+    hk._hae_wms_kuva.cache_clear()
+    pdf = jx.piirra_asemapiste_kartta(asema, str(tmp_path / "pdf.png"))
+    assert kutsut == [1] and open(sivu, "rb").read() == open(pdf, "rb").read()
+
+    def aikakatkaisu(*a, **k):
+        kutsut.append(1)
+        raise requests.Timeout("x")
+
+    monkeypatch.setattr(hk.requests, "get", aikakatkaisu)
+    toinen = dict(asema, n=6680700.0)
+    jx.piirra_asemapiste_kartta(toinen, str(tmp_path / "t1.png"))
+    monkeypatch.setattr(hk, "_wms_tauko_asti", [0.0])
+    jx.piirra_asemapiste_kartta(toinen, str(tmp_path / "t2.png"))
+    assert len(kutsut) == 3          # ilman taustaa jäänyt yritetään uudelleen
