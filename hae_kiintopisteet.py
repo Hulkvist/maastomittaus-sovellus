@@ -320,6 +320,26 @@ def hae_kiinteiston_alue(kiinteistotunnus_raw, api_key):
     return alue
 
 
+# Helsingin karttapalvelun (kartta.hel.fi: WMS ja WFS) tauko: jos haku aikakatkaistaan tai yhteys ei
+# onnistu, seuraavat haut epäonnistuvat heti WMS_TAUKO_S ajan. Streamlit Cloudin palvelin on ulkomailla, ja
+# yhteys kartta.hel.fi:hin voi takkuilla: ilman taukoa jokainen asemapistekartta ja jokainen sivun
+# uudelleenajo (kantakartan rakennukset seinälinjalle) odottaisi aikarajan verran.
+WMS_TAUKO_S = 300
+_wms_tauko_asti = [0.0]
+
+
+def _helsinki_get(url, params, timeout):
+    if time.time() < _wms_tauko_asti[0]:
+        raise RuntimeError("Helsingin karttapalvelu (kartta.hel.fi) ei vastannut äsken, ohitetaan hetkeksi")
+    try:
+        resp = requests.get(url, params=params, timeout=timeout)
+    except (requests.Timeout, requests.ConnectionError):
+        _wms_tauko_asti[0] = time.time() + WMS_TAUKO_S
+        raise
+    resp.raise_for_status()
+    return resp
+
+
 def hae_helsinki_rakennukset(bbox_3879):
     """Helsingin kantakartan voimassa olevat rakennukset (WFS) alueelta (x0, y0, x1, y1),
     EPSG:3879. Palauttaa [{"tyyppi", "osoite", "polygoni"}]."""
@@ -330,8 +350,7 @@ def hae_helsinki_rakennukset(bbox_3879):
         "srsName": f"EPSG:{DB_SRID}",
         "bbox": f"{x0},{y0},{x1},{y1},EPSG:{DB_SRID}",
     }
-    resp = requests.get(HELSINKI_WFS_URL, params=params, timeout=60)
-    resp.raise_for_status()
+    resp = _helsinki_get(HELSINKI_WFS_URL, params, 20)
 
     rakennukset = []
     for f in resp.json().get("features", []):
@@ -887,13 +906,6 @@ def tunnista_kiinteisto_pisteparvesta(pisteet, api_key, marginaali_m=5):
     return ehdotettu_tunnus, dict(osumat), len(pisteet_mukana)
 
 
-# Helsingin WMS:n tauko: jos haku aikakatkaistaan tai yhteys ei onnistu, seuraavat haut ohitetaan heti
-# WMS_TAUKO_S ajan (Streamlit Cloudin palvelin on ulkomailla ja yhteys kartta.hel.fi:hin voi takkuilla:
-# ilman taukoa jokainen asemapistekartta odottaisi aikarajan verran).
-WMS_TAUKO_S = 300
-_wms_tauko_asti = [0.0]
-
-
 @lru_cache(maxsize=64)
 def _hae_wms_kuva(bbox_3879, leveys_px, korkeus_px, layer, timeout):
     params = {
@@ -908,12 +920,7 @@ def _hae_wms_kuva(bbox_3879, leveys_px, korkeus_px, layer, timeout):
         "HEIGHT": korkeus_px,
         "FORMAT": "image/png",
     }
-    try:
-        resp = requests.get(HELSINKI_WMS_URL, params=params, timeout=timeout)
-    except (requests.Timeout, requests.ConnectionError):
-        _wms_tauko_asti[0] = time.time() + WMS_TAUKO_S
-        raise
-    resp.raise_for_status()
+    resp = _helsinki_get(HELSINKI_WMS_URL, params, timeout)
     if "image" not in resp.headers.get("Content-Type", ""):
         raise RuntimeError(f"Helsingin WMS ei palauttanut kuvaa: {resp.text[:300]}")
     return resp.content
@@ -925,8 +932,6 @@ def hae_helsinki_kantakartta(bbox_3879, leveys_px=1200, korkeus_px=1200, layer=H
     uudelleen). Jos palvelu ei vastannut äsken (WMS_TAUKO_S), virhe tulee heti."""
     from PIL import Image
 
-    if time.time() < _wms_tauko_asti[0]:
-        raise RuntimeError("Helsingin karttapalvelu ei vastannut äsken, tausta ohitetaan hetkeksi")
     sisalto = _hae_wms_kuva(tuple(round(float(v), 3) for v in bbox_3879), leveys_px, korkeus_px, layer, timeout)
     return Image.open(io.BytesIO(sisalto))
 
