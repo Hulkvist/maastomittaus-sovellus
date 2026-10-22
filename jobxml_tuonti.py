@@ -334,12 +334,27 @@ def laske_asemapisteen_sijaintiluokitus(asema_piste, liitospisteet, k=GEOMETRIA_
 # Kartat (Helsingin harmaakantakartta)
 # ---------------------------------------------------------------------------
 
+# Piirretyt asemapistekartat (PNG) muistissa: sama asema piirtyy sovelluksen sivulla ja PDF-raportissa,
+# joten raportti käyttää sivulla jo piirrettyä kuvaa. Vain kartat, joihin kantakartta saatiin taustalle;
+# ilman taustaa jääneet piirretään uudelleen (palvelu voi olla jo toipunut).
+_ASEMAKARTAT = {}
+_ASEMAKARTAT_MAX = 200
+
+
 def piirra_asemapiste_kartta(asemapiste, out_path):
-    """Pieni kartta yhdelle asemapisteelle ja sen liitospisteille."""
+    """Pieni kartta yhdelle asemapisteelle ja sen liitospisteille (muistista, jos sama asema on jo
+    piirretty taustan kanssa)."""
     import hae_kiintopisteet as hk
 
     if asemapiste.get("n") is None or asemapiste.get("e") is None:
         return None
+    avain = (round(asemapiste["n"], 4), round(asemapiste["e"], 4),
+             tuple(asemapiste.get("liitospisteet_koordinaatit") or ()),
+             tuple(asemapiste.get("korkeusliitos_koordinaatit") or ()))
+    if avain in _ASEMAKARTAT:
+        with open(out_path, "wb") as f:
+            f.write(_ASEMAKARTAT[avain])
+        return out_path
 
     liitospisteet = [
         {"nimi": nimi, "n": n, "e": e}
@@ -350,9 +365,16 @@ def piirra_asemapiste_kartta(asemapiste, out_path):
         for (nimi, n, e) in asemapiste.get("korkeusliitos_koordinaatit", [])
     ]
 
-    return hk.piirra_asemapisteen_pienikartta(
-        asemapiste["n"], asemapiste["e"], liitospisteet, korkeusliitokset, out_path,
+    tiedot = {}
+    tulos = hk.piirra_asemapisteen_pienikartta(
+        asemapiste["n"], asemapiste["e"], liitospisteet, korkeusliitokset, out_path, tiedot=tiedot,
     )
+    if tulos and tiedot.get("tausta"):
+        if len(_ASEMAKARTAT) >= _ASEMAKARTAT_MAX:
+            _ASEMAKARTAT.pop(next(iter(_ASEMAKARTAT)))
+        with open(tulos, "rb") as f:
+            _ASEMAKARTAT[avain] = f.read()
+    return tulos
 
 
 def piirra_yleiskartta(pisteet, out_path):

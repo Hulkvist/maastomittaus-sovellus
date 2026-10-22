@@ -932,7 +932,9 @@ def hae_helsinki_kantakartta(bbox_3879, leveys_px=1200, korkeus_px=1200, layer=H
 
 
 def piirra_asemapisteen_pienikartta(asema_n, asema_e, liitospisteet, korkeusliitokset,
-                                     out_path, margin_m=15):
+                                     out_path, margin_m=15, tiedot=None):
+    """Asemapisteen pieni kartta PNG:ksi. tiedot (dict, valinnainen) saa avaimen "tausta": saatiinko
+    kantakartta taustalle."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -958,8 +960,12 @@ def piirra_asemapisteen_pienikartta(asema_n, asema_e, liitospisteet, korkeusliit
         kuva = hae_helsinki_kantakartta(bbox, leveys_px=500, korkeus_px=500,
                                          layer=HELSINKI_KANTAKARTTA_HARMAA_LAYER, timeout=10)
         ax.imshow(kuva, extent=(bbox[0], bbox[2], bbox[1], bbox[3]), zorder=0)
+        if tiedot is not None:
+            tiedot["tausta"] = True
     except Exception as e:
         ax.set_facecolor("#e8e8e8")
+        if tiedot is not None:
+            tiedot["tausta"] = False
         print(f"Huom: Helsingin harmaakartan haku epäonnistui pienoiskartalle ({e}) -- jatketaan ilman taustaa.")
 
     horis_koords = [(p["e"], p["n"]) for p in liitospisteet if p.get("n") is not None and p.get("e") is not None]

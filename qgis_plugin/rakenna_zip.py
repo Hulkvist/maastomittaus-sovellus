@@ -28,7 +28,7 @@ JAETUT = ["jobxml_tuonti.py", "seinalinja.py", "seinat_pilvesta.py"]
 # skriptistä (mm. kannan taulut ja SQL eivät päädy jaettavaan tiedostoon).
 KARSITTAVAT = {
     "jobxml_tuonti.py": [
-        "piirra_asemapiste_kartta", "piirra_yleiskartta", "muodosta_seinalinja", "pisteet_tallennettavaksi",
+        "_ASEMAKARTAT", "_ASEMAKARTAT_MAX", "piirra_asemapiste_kartta", "piirra_yleiskartta", "muodosta_seinalinja", "pisteet_tallennettavaksi",
         "KRD_MITATUT", "KRD_LIITOKSET", "KRD_RTK", "KRD_KOODIMUUNNOS", "KRD_KOODISELITTEET", "KRD_TUNTEMATON_KOODI",
         "_krd_kirjainkoodi", "krd_koodi", "_krd_valitut", "krd_kirjainkoodit", "krd_pisteet", "kirjoita_krd",
         "_tallennettavat_asemat", "mittausjarjestys", "tallenna_mittaukset_kantaan", "tallenna_seinalinjat_kantaan", "poista_mittaukset_kannasta", "poista_mittaukset_lahdetiedostolla",
