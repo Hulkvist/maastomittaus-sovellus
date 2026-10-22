@@ -14,6 +14,7 @@ import hashlib
 import math
 import os
 import tempfile
+import time
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
@@ -54,6 +55,21 @@ import hae_kiintopisteet as hk
 import jobxml_tuonti as jx
 import mittausraportti as mr
 import seinalinja as sl
+
+
+_AJON_ALKU = time.time()
+
+
+def _ajastettu(nimi, funktio, *args, **kwargs):
+    """Ajaa funktion ja kirjoittaa Streamlitin lokiin keston, jos yli 1 s (hitauden syyn etsintään:
+    palvelin hakee osan tiedoista ulkoisista palveluista)."""
+    alku = time.time()
+    try:
+        return funktio(*args, **kwargs)
+    finally:
+        kesto = time.time() - alku
+        if kesto > 1.0:
+            print(f"Aika: {nimi} {kesto:.1f} s", flush=True)
 
 st.set_page_config(page_title="Kiintopisteiden, rajamerkkien ja rakennusten nurkkien haku", layout="wide")
 st.image("kuvat/koirat_kuplat.jpg", width="stretch")  # alkuperäinen ilman kuplia: kuvat/koirat.jpg
@@ -482,7 +498,8 @@ if ladattu_tiedosto is not None:
     raaka_bytes = ladattu_tiedosto.getvalue()
 
     try:
-        raportti, kaikki_pisteet, hylatyt = jx.jasenna_tyo(raaka_bytes, lahdetiedosto=ladattu_tiedosto.name)
+        raportti, kaikki_pisteet, hylatyt = _ajastettu("JobXML:n jäsennys", jx.jasenna_tyo, raaka_bytes,
+                                                      lahdetiedosto=ladattu_tiedosto.name)
     except Exception as e:
         st.error(f"Tiedoston jäsennys epäonnistui: {e}")
         raportti, kaikki_pisteet, hylatyt = None, [], []
@@ -492,7 +509,8 @@ if ladattu_tiedosto is not None:
         if ehdotus_avain not in st.session_state:
             try:
                 with st.spinner("Tunnistetaan kiinteistöä automaattisesti mitatuista pisteistä..."):
-                    tulos = hk.tunnista_kiinteisto_pisteparvesta(kaikki_pisteet, hk.MML_API_KEY)
+                    tulos = _ajastettu("kiinteistön tunnistus (MML)", hk.tunnista_kiinteisto_pisteparvesta,
+                                    kaikki_pisteet, hk.MML_API_KEY)
                 st.session_state[ehdotus_avain] = (tulos[0], tulos[1], tulos[2], None)
                 # Ehdotus kirjoitetaan suoraan tekstikentän session_state-avaimeen
                 # ennen kuin widget luodaan alempana (text_input:in value= toimii vain
@@ -522,7 +540,8 @@ def _seinalinjan_kantakartta(pisteet):
     valimuisti = st.session_state.setdefault("_kantakartta_valimuisti", {})
     if bbox not in valimuisti:
         try:
-            valimuisti[bbox] = hk.rakennusten_renkaat(hk.hae_helsinki_rakennukset(bbox))
+            valimuisti[bbox] = hk.rakennusten_renkaat(
+                _ajastettu("kantakartan rakennukset (kartta.hel.fi)", hk.hae_helsinki_rakennukset, bbox))
         except Exception as e:
             return None, str(e), True   # epäonnistunutta hakua ei jätetä muistiin
     return valimuisti[bbox] or None, None, True
@@ -766,7 +785,8 @@ if ladattu_tiedosto is not None and raportti:
             with st.spinner("Tehdään mittausraporttia..."):
                 try:
                     pdf_valimuisti.clear()
-                    pdf_valimuisti[pdf_avain] = (mr.tee_pdf(raportti, kaikki_pisteet, hylatyt), None)
+                    pdf_valimuisti[pdf_avain] = (_ajastettu("mittausraportti (PDF)", mr.tee_pdf, raportti, kaikki_pisteet,
+                                                           hylatyt), None)
                 except Exception as pdf_virhe:
                     pdf_valimuisti[pdf_avain] = (None, str(pdf_virhe))
         pdf_bytes, pdf_virhe = pdf_valimuisti[pdf_avain]
@@ -931,7 +951,7 @@ if ladattu_tiedosto is not None and raportti:
                     try:
                         tmp_kartta_dir = tempfile.mkdtemp()
                         kartta_path = os.path.join(tmp_kartta_dir, f"asema_{a['nimi']}.png")
-                        tulos_polku = jx.piirra_asemapiste_kartta(a, kartta_path)
+                        tulos_polku = _ajastettu(f"asemapistekartta {a['nimi']}", jx.piirra_asemapiste_kartta, a, kartta_path)
                         if tulos_polku and os.path.exists(tulos_polku):
                             st.image(tulos_polku, caption="tähti = asema, sininen = liitospiste, harmaa = korkeuspiste")
                         else:
@@ -1165,3 +1185,5 @@ else:
                        "raporttia poistettu.")
 
 
+if time.time() - _AJON_ALKU > 3.0:
+    print(f"Aika: sivun ajo yhteensä {time.time() - _AJON_ALKU:.1f} s", flush=True)

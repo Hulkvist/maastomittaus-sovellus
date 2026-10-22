@@ -148,3 +148,27 @@ def test_asemakartta_muistetaan_pdf_varten(tmp_path, monkeypatch):
     monkeypatch.setattr(hk, "_wms_tauko_asti", [0.0])
     jx.piirra_asemapiste_kartta(toinen, str(tmp_path / "t2.png"))
     assert len(kutsut) == 3          # ilman taustaa jäänyt yritetään uudelleen
+
+
+def test_kantakartan_rakennukset_kayttavat_samaa_taukoa(monkeypatch):
+    """WFS-haun (kantakartan rakennukset seinälinjalle) aikakatkaisu laittaa tauon myös WMS-hauille ja
+    päinvastoin: sivun uudelleenajot eivät odota aikarajaa joka kerta."""
+    import pytest as _pytest
+    import requests
+
+    import hae_kiintopisteet as hk
+    kutsut = []
+
+    def aikakatkaisu(*a, **k):
+        kutsut.append(k.get("timeout"))
+        raise requests.Timeout("x")
+
+    monkeypatch.setattr(hk.requests, "get", aikakatkaisu)
+    monkeypatch.setattr(hk, "_wms_tauko_asti", [0.0])
+    for _ in range(3):
+        with _pytest.raises(Exception):
+            hk.hae_helsinki_rakennukset((25496260, 6680610, 25496320, 6680660))
+    hk._hae_wms_kuva.cache_clear()
+    with _pytest.raises(Exception):
+        hk.hae_helsinki_kantakartta((1, 2, 3, 4))
+    assert kutsut == [20]
