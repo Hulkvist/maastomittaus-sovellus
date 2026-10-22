@@ -81,6 +81,27 @@ ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS mitattu TIMESTAMP;
 ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS asema TEXT;
 ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS asema_nro INT;
 ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS jarjestys INT;
+-- Mittauksen lisätiedot JobXML:stä. Takymetri: prisma (tähyksen nimi Accessissa), prismatyyppi,
+-- prismavakio (mm), tähyskorkeus, vaaka- ja pystykulma (gon), kojeasento (I/II) ja mitattiinko
+-- kahdessa kojeasennossa. RTK: antennikorkeus (mitattu), Accessin tarkkuusarviot vaakaan ja
+-- korkeuteen, HDOP/VDOP, kallistusetäisyys (sauvan kallistuksen siirtymä) ja korjausviestin ikä.
+-- ominaisuudet = koodikirjaston attribuutit tekstinä ("Rakennetyyppi: Sokkeli").
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS prisma TEXT;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS prismatyyppi TEXT;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS prismavakio_mm NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS tahyskorkeus_m NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS vaakakulma_gon NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS pystykulma_gon NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS kojeasento TEXT;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS kahdesta_kojeasennosta BOOLEAN;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS antennikorkeus_m NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS tarkkuus_vaaka_m NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS tarkkuus_korkeus_m NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS hdop NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS vdop NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS kallistusetaisyys_m NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS korjauksen_ika_s NUMERIC;
+ALTER TABLE kentalla_mitatut_pisteet ADD COLUMN IF NOT EXISTS ominaisuudet TEXT;
 
 -- Mittauksista muodostetut seinälinjat (koodit 8/5/100), tallennetaan pisteiden
 -- kanssa samalla napilla. Saman kiinteistön ja lähdetiedoston viivat korvataan

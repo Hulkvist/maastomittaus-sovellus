@@ -187,6 +187,11 @@ def test_mittausten_tallennus_ja_poistot(db):
     rivi = kysy(db, "SELECT kuvaus, tarkkuusluokka, mittaustapa, vinoetaisyys > 0 FROM kentalla_mitatut_pisteet "
                     "WHERE pistetunnus = '1' AND kiinteistotunnus = '091-1-1-1';")
     assert rivi == [("Kartoituspiste", "8", "Takymetri", True)]
+    # Mittauksen lisätiedot: takymetripisteellä prisma, vakio, tähyskorkeus ja kulmat, ei RTK-tietoja
+    lisa = kysy(db, "SELECT prisma IS NOT NULL, tahyskorkeus_m IS NOT NULL, vaakakulma_gon BETWEEN 0 AND 400, "
+                    "kojeasento IN ('I', 'II'), antennikorkeus_m IS NULL FROM kentalla_mitatut_pisteet "
+                    "WHERE pistetunnus = '1' AND kiinteistotunnus = '091-1-1-1';")
+    assert lisa == [(True, True, True, True, True)]
 
     assert jx.poista_mittaukset_kannasta("091-1-1-2", db) == (2, 0, 0)
     assert jx.poista_mittaukset_lahdetiedostolla("muu.jxl", db) == (0, 0, 0)
