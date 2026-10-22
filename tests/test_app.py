@@ -206,6 +206,7 @@ def test_mittausten_tallennus_vie_seinalinjan(monkeypatch):
                and "2 asemapistettä" in s.value for s in at.success)
 
 
+@pytest.mark.oikeat_aineistot
 def test_seinalinjan_muokkaus_dxf_ja_tallennus(monkeypatch):
     """Muokkauskartta päälle ei kaada; käsin tehty muokkaus (istunnossa) näkyy DXF-napissa ja menee
     tallennukseen."""
