@@ -167,6 +167,7 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
         return xyz, origo
 
     def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
+        ydin.taysi_vauhti()        # QGIS:n taustasäie olisi hidas (macOS: tehokkuusytimet)
         polku = self.parameterAsFile(parameters, self.PILVI, context)
         from qgis.core import QgsSettings
         QgsSettings().setValue("maastomittaus/viimeisin_pilvi", polku)   # valikko täyttää seuraavalla kerralla

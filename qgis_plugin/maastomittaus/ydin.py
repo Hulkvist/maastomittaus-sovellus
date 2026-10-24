@@ -315,10 +315,11 @@ def lue_las_xyz(polku):
     return xyz_int * np.array(skaala) + np.array(siirto)
 
 
-def lue_las_paikallinen(polku, osa=5_000_000):
+def lue_las_paikallinen(polku, osa=5_000_000, luokat=False):
     """Pakkaamattoman LAS-tiedoston pisteet paikallisina float32-koordinaatteina (n x 3) ja siirto
     (e0, n0, 0): kartan koordinaatti = paikallinen + siirto. Puolet vähemmän muistia kuin lue_las_xyz,
-    ja luku paloittain, joten iso pilvi (Stonex, kymmeniä miljoonia pisteitä) mahtuu muistiin."""
+    ja luku paloittain, joten iso pilvi (Stonex, kymmeniä miljoonia pisteitä) mahtuu muistiin.
+    luokat=True: lisäksi pisteiden luokat (uint8; ilmakeilauksen katot erottavat seinät aidoista)."""
     import numpy as np
 
     with open(polku, "rb") as f:
@@ -336,13 +337,77 @@ def lue_las_paikallinen(polku, osa=5_000_000):
     siirto = np.array(struct.unpack("<3d", otsikko[155:179]))
     _, min_x, _, min_y = struct.unpack("<4d", otsikko[179:211])
     origo = np.array([math.floor(min_x), math.floor(min_y), 0.0])
-    tietue = np.dtype([("xyz", "<i4", (3,)), ("muut", f"V{pituus - 12}")])
+    # Luokka: pistemuodoissa 0–5 tavussa 15 (5 alinta bittiä), muodoissa 6–10 tavussa 16
+    muoto = otsikko[104] & 0x3F
+    luokan_kohta, maski = (16, 0xFF) if muoto >= 6 else (15, 0x1F)
+    tietue = np.dtype({"names": ["xyz", "luokka"], "formats": [("<i4", (3,)), "u1"],
+                       "offsets": [0, luokan_kohta], "itemsize": pituus})
     data = np.memmap(polku, dtype=tietue, mode="r", offset=alku, shape=(maara,))
     xyz = np.empty((maara, 3), dtype=np.float32)
+    luokka = np.empty(maara, dtype=np.uint8) if luokat else None
     for i in range(0, maara, osa):
         xyz[i:i + osa] = data["xyz"][i:i + osa] * skaala + (siirto - origo)
+        if luokat:
+            luokka[i:i + osa] = data["luokka"][i:i + osa] & maski
     del data
-    return xyz, origo
+    return (xyz, origo, luokka) if luokat else (xyz, origo)
+
+
+def taysi_vauhti():
+    """Laskentasäie täydelle nopeudelle. QGIS ajaa Processing-työkalut taustasäikeessä: macOS siirtää sen
+    tehokkuusytimille (mitattu Apple M: sama pistepilven ruutu 67 s -> 310 s) ja Windows 11 voi hidastaa
+    taustasäiettä (EcoQoS). Palauttaa, onnistuiko; virheet ohitetaan (työkalu toimii silti)."""
+    import ctypes
+    import sys
+
+    try:
+        if sys.platform == "darwin":
+            libc = ctypes.CDLL("/usr/lib/libSystem.dylib")
+            return libc.pthread_set_qos_class_self_np(0x19, 0) == 0          # QOS_CLASS_USER_INITIATED
+        if sys.platform == "win32":
+            from ctypes import wintypes
+
+            class Tila(ctypes.Structure):     # THREAD_POWER_THROTTLING_STATE
+                _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG),
+                            ("StateMask", wintypes.ULONG)]
+
+            k32 = ctypes.windll.kernel32
+            saie = k32.GetCurrentThread()
+            k32.SetThreadPriority(saie, 0)                                   # THREAD_PRIORITY_NORMAL
+            tila = Tila(1, 1, 0)        # EXECUTION_SPEED-hidastus pois päältä
+            return bool(k32.SetThreadInformation(saie, 3, ctypes.byref(tila), ctypes.sizeof(tila)))
+    except Exception:
+        pass
+    return False
+
+
+def ruudut(x0, y0, x1, y1, koko):
+    """Ruutuverkko alueelle (x0, y0, x1, y1): [(i, j, e0, n0)], ruudun vasen alakulma (e0, n0) koon
+    monikerroilla, joten samassa paikassa olevat ruudut ovat samat alueesta riippumatta."""
+    i0, j0 = math.floor(x0 / koko), math.floor(y0 / koko)
+    i1, j1 = math.floor(x1 / koko), math.floor(y1 / koko)
+    return [(i, j, i * koko, j * koko) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)]
+
+
+class Kattorasteri:
+    """Ilmakeilauksen kattopisteet (rakennusluokka) rasterina alueelle (x0, y0, x1, y1) solulla solu [m].
+    Ruuduittain lisätyt pisteet (lisaa) kootaan koko alueelle; seinat_pilvesta.roof_share mittaa linjoille
+    katon läheisyyden (aidat ja muurit pois)."""
+
+    def __init__(self, alue, solu=0.5):
+        import numpy as np
+
+        self.e0, self.n0 = float(alue[0]), float(alue[1])
+        self.solu = solu
+        self.rasteri = np.zeros((int((alue[2] - alue[0]) / solu) + 1, int((alue[3] - alue[1]) / solu) + 1), bool)
+
+    def lisaa(self, xy):
+        """xy (n x 2) kartan koordinaatteina (ETRS-GK25)."""
+        import numpy as np
+
+        q = np.floor((np.asarray(xy, float) - (self.e0, self.n0)) / self.solu).astype(np.int64)
+        ok = (q[:, 0] >= 0) & (q[:, 0] < self.rasteri.shape[0]) & (q[:, 1] >= 0) & (q[:, 1] < self.rasteri.shape[1])
+        self.rasteri[q[ok, 0], q[ok, 1]] = True
 
 
 def _ulkonormaali(viiva, a, b):

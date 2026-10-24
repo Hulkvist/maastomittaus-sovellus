@@ -167,11 +167,22 @@ class Segment:
         return float(np.linalg.norm(self.p1 - self.p0))
 
 
-def ground_sample(xyz: np.ndarray, n: int = 5_000_000) -> np.ndarray:
-    """Maanpinnan otos isosta pilvestä: joka k:s piste (tallennusjärjestys on ajallinen, joten otos kattaa
-    alueen tasaisesti). Ei satunnainen: satunnainen otos muutti maanpintaa seinien kohdalla 10 %:ssa
-    pisteistä yli 2,7 cm, mikä vaihtoi Katajaharjussa 22 % seinäsoluista ja 11 % linjapituudesta."""
-    return xyz if len(xyz) <= n else xyz[::-(-len(xyz) // n)]
+def ground_sample(xyz: np.ndarray, n: int = 5_000_000, chunk: int = 5_000_000) -> np.ndarray:
+    """Maanpinnan otos isosta pilvestä: noin n pistettä, valittuna pisteen omasta paikasta (millimetreinä
+    tiivistetty) eikä järjestyksestä. Sama pilvi antaa saman otoksen, luettiinpa se LAZ:sta tai COPC:sta tai
+    rajattiinpa se usealla säikeellä (QGIS:n pdal:clip: järjestys vaihtelee ajosta toiseen; joka k:s piste
+    muutti tulosta). Ei satunnainen: satunnainen otos muutti maanpintaa seinien kohdalla 10 %:ssa pisteistä
+    yli 2,7 cm, mikä vaihtoi Katajaharjussa 22 % seinäsoluista ja 11 % linjapituudesta."""
+    if len(xyz) <= n:
+        return xyz
+    k = -(-len(xyz) // n)
+    keep = np.empty(len(xyz), bool)
+    for start in range(0, len(xyz), chunk):
+        q = np.round(xyz[start:start + chunk, :3].astype(np.float64) * 1000).astype(np.int64)
+        h = (q[:, 0] * 73856093) ^ (q[:, 1] * 19349663) ^ (q[:, 2] * 83492791)
+        h ^= h >> 17
+        keep[start:start + chunk] = (h * 0x9E3779B1) % k == 0
+    return xyz[keep]
 
 
 class Ground:
@@ -535,8 +546,9 @@ def _facade(layers: np.ndarray, opt: WallOptions):
 
 def _near_points(seg: Segment, xyz: np.ndarray, rel: np.ndarray, index: _GridIndex, opt: WallOptions, pad: float = 0.1):
     """Suoran ympäristön pisteet suoran koordinaateissa: (s pituussuunnassa, t normaalin suunnassa, h maasta).
-    Rinteessä (maa vaihtelee seinän matkalla yli slope_min) h on seinän keskimääräisestä maasta: sokkelin yläreuna
-    on vaakasuora, ja paikallisesta maasta mitattuna sokkeli ja julkisivu sekoittuisivat samoille korkeuksille.
+    Rinteessä (maa vaihtelee seinän matkalla yli slope_min) h on seinän keskimääräisestä maasta: sokkelin
+    yläreuna on vaakasuora, ja paikallisesta maasta mitattuna sokkeli ja julkisivu sekoittuisivat samoille
+    korkeuksille.
     Alimmasta maasta mitattuna alarinteen pää näyttäisi kivijalalta (sokkeli yli plinth_max)."""
     lo = np.minimum(seg.p0, seg.p1) - opt.search - pad
     hi = np.maximum(seg.p0, seg.p1) + opt.search + pad
@@ -851,6 +863,91 @@ def _cross(p, q, a, b, tol: float = 0.05) -> bool:
     return -lt <= t <= 1 + lt and -lu <= u <= 1 + lu
 
 
+def _snap_recesses(segs: list[Segment], opt: WallOptions, ground_xy: np.ndarray, min_depth: float = 0.15,
+                   facade_share: float = 0.3) -> list[Segment]:
+    """Kartoitusyleistys ennen yhdistämistä: seinän pienet syvennykset ja pilarit julkisivun tasolle.
+
+    Rinnakkaiset palat, jotka ovat enintään general_depth sivussa toisistaan ja enintään general_width
+    päässä toisistaan seinän suunnassa, ovat saman seinän vyöhyke. Ulkopuoli päätellään maanpinnasta
+    (_outside). Julkisivu on uloin taso, joka kattaa vähintään facade_share vyöhykkeen pituudesta. Muun tason
+    pala, joka on min_depth–general_depth julkisivusta, enintään general_width pitkä ja jonka molemmin puolin
+    (enintään general_width päässä) on julkisivun pala, siirretään julkisivun tasolle. Kruna2: täyskorkeiden
+    ikkunasyvennysten (0,33 m) pohjat yhdistyivät julkisivun aukkojen yli pidemmäksi linjaksi kuin julkisivu
+    itse, joka katkesi pilarien (0,28 m ulos) kohdalla."""
+    n_seg = len(segs)
+    if n_seg < 3 or len(ground_xy) == 0:
+        return segs
+    cos_lim = np.cos(np.radians(5.0))
+    parent = list(range(n_seg))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    mids = np.array([(q.p0 + q.p1) / 2 for q in segs])
+    for i in range(n_seg):
+        a = segs[i]
+        for j in range(i + 1, n_seg):
+            b = segs[j]
+            if abs(a.direction @ b.direction) < cos_lim:
+                continue
+            long_, short = (a, b) if a.length >= b.length else (b, a)
+            d, n = long_.direction, long_.normal
+            if abs((mids[j] - mids[i]) @ n) > opt.general_depth + 0.05:
+                continue
+            sa, sb = sorted([a.p0 @ d, a.p1 @ d]), sorted([b.p0 @ d, b.p1 @ d])
+            if max(sb[0] - sa[1], sa[0] - sb[1]) <= opt.general_width:
+                parent[root(i)] = root(j)
+    groups = {}
+    for i in range(n_seg):
+        groups.setdefault(root(i), []).append(i)
+    gindex = _GridIndex(ground_xy, 1.0)
+    for members in groups.values():
+        if len(members) < 3:
+            continue
+        ref = max((segs[k] for k in members), key=lambda q: q.length)
+        d, n = ref.direction, ref.normal
+        s01 = np.array([sorted([segs[k].p0 @ d, segs[k].p1 @ d]) for k in members])
+        span = Segment(d * s01[:, 0].min() + n * (ref.p0 @ n), d * s01[:, 1].max() + n * (ref.p0 @ n), d,
+                       float(ref.p0 @ n), np.zeros((0, 2)))
+        out = _outside(span, ground_xy, gindex)
+        if out == 0:
+            continue
+        off = np.array([(mids[k] @ n) * out for k in members])          # suurempi = ulompana
+        lengths = np.array([segs[k].length for k in members])
+        order = np.argsort(off)
+        levels, cur = [], [order[0]]
+        for k in order[1:]:
+            if off[k] - off[cur[-1]] <= opt.wall_offset + 0.02:
+                cur.append(k)
+            else:
+                levels.append(cur)
+                cur = [k]
+        levels.append(cur)
+        extent = s01[:, 1].max() - s01[:, 0].min()
+        facade = next((lv for lv in reversed(levels) if lengths[lv].sum() >= facade_share * extent), None)
+        if facade is None or len(levels) < 2:
+            continue
+        f_off = float(np.average(off[facade], weights=lengths[facade]))
+        f_s = s01[facade]
+        for k, m in enumerate(members):
+            q = segs[m]
+            depth = abs(off[k] - f_off)
+            if k in facade or not (min_depth <= depth <= opt.general_depth + 0.05) or q.length > opt.general_width:
+                continue
+            s0, s1 = s01[k]
+            left = np.any((f_s[:, 1] <= s0 + 0.1) & (s0 - f_s[:, 1] <= opt.general_width))
+            right = np.any((f_s[:, 0] >= s1 - 0.1) & (f_s[:, 0] - s1 <= opt.general_width))
+            if not (left and right):
+                continue
+            shift = n * (out * (f_off - off[k]))
+            segs[m] = Segment(q.p0 + shift, q.p1 + shift, q.direction, float((q.p0 + shift) @ q.normal),
+                              q.points + shift, snapped=q.snapped, info=q.info)
+    return segs
+
+
 def merge_walls(segments: list[Segment], opt: WallOptions) -> list[Segment]:
     """Saman seinän (suunta ja sivusijainti samat) palat yhdeksi linjaksi aukkojen yli, ellei aukon
     kohdalla ole toista seinää (esim. sisäänveto tai poikkiseinä)."""
@@ -862,7 +959,15 @@ def merge_walls(segments: list[Segment], opt: WallOptions) -> list[Segment]:
         for i in range(len(segs)):
             for j in range(i + 1, len(segs)):
                 a, b = segs[i], segs[j]
-                if abs(a.direction @ b.direction) < cos_lim:
+                if b.length > a.length:
+                    # Suunta pidemmästä: lyhyen palan suunta voi poiketa muutaman asteen, jolloin toisen palan
+                    # pisteet muutaman metrin päässä näyttivät 10 cm sivussa olevilta (Kruna2: 0,5 m palat)
+                    a, b = b, a
+                cos_ab = abs(a.direction @ b.direction)
+                # Kulmaraja ei koske lyhyttä palaa, jonka pää poikkeaa kulman takia alle wall_offset: 0,5 m
+                # palan suunta heittää 2–5° (pilarin ja ikkunasyvennyksen väli), ja yhdistetty linja
+                # sovitetaan uudelleen
+                if cos_ab < cos_lim and b.length * np.sqrt(max(0.0, 1 - cos_ab ** 2)) > opt.wall_offset:
                     continue
                 d, n = a.direction, a.normal
                 sa, sb = sorted([a.p0 @ d, a.p1 @ d]), sorted([b.p0 @ d, b.p1 @ d])
@@ -875,14 +980,20 @@ def merge_walls(segments: list[Segment], opt: WallOptions) -> list[Segment]:
                     off = _robust_offset(np.vstack([a.points, b.points]) @ n)
                     lo, hi = (sa[1], sb[0]) if sa[1] <= sb[0] else (sb[1], sa[0])
                     p, q = d * lo + n * off, d * hi + n * off
-                    # Kartoitusyleistys: pienen ulokkeen tai sisennyksen kyljet (enintään general_depth)
-                    # eivät estä yhdistämistä, kun aukko on enintään general_width
+                    # Kartoitusyleistys: pienen ulokkeen tai sisennyksen kyljet (päät enintään general_depth
+                    # linjasta) eivät estä yhdistämistä, kun aukko on enintään general_width. Pilarin ja
+                    # ikkunasyvennyksen kyljet voivat olla samassa linjassa (Kruna2: 0,28 m ulos + 0,33 m sisään)
                     small = gap <= opt.general_width
-                    if any(_cross(p, q, c.p0, c.p1) and not (small and c.length <= opt.general_depth + 0.05)
+                    if any(_cross(p, q, c.p0, c.p1) and not (
+                            small and max(abs((c.p0 - p) @ n), abs((c.p1 - p) @ n)) <= opt.general_depth + 0.05)
                            for k, c in enumerate(segs) if k not in (i, j)):
                         continue
                 pts = np.vstack([a.points, b.points])
                 seg = _merged(pts, d, a, b, opt)
+                # Yhdistetty linja ei saa siirtää kumpaakaan palaa yli wall_offset: lähes samansuuntaiset eri
+                # seinät (Konala: talousrakennus 2 m talon seinän jatkeena, 1,8°) eivät ole sama seinä
+                if any(abs(_robust_offset((c.points - seg.p0) @ seg.normal)) > opt.wall_offset for c in (a, b)):
+                    continue
                 seg.snapped = a.snapped or b.snapped
                 segs[i] = seg
                 segs.pop(j)
@@ -1173,18 +1284,23 @@ def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segme
         index = _GridIndex(pts[:, :2], 1.0)
         segs = [r for r in (refine_segment(s, pts, rel, index, opt) for s in segs) if r is not None]
     del band
+    # Maanpinta kertoo seinän ulkopuolen (_snap_recesses, _drop_upper_duplicates)
+    gxy = None if opt.indoor else sample[height(sample) < 0.15, :2]
     segs = regularize(segs, opt)
+    if gxy is not None:
+        segs = _snap_recesses(segs, opt, gxy)
     segs = merge_walls(segs, opt)
     segs = close_corners(segs, opt)
     segs = prune_short(segs, opt)
     segs = _generalize(segs, opt)
     segs = outline(segs, opt) if opt.outline else segs
     if not opt.indoor:
-        gxy = sample[height(sample) < 0.15, :2]
         segs = _drop_inside(segs, gxy[ground.raised(gxy) < opt.floor_raise])
     if opt.refine and segs:
         wall_info(segs, pts, rel, index, opt)
-        segs = _drop_upper_duplicates(segs)
+        # Ulkopuoli suodattamattomasta maasta: talon sisälle täyttyy kadun matalampi maa, jolloin
+        # sisäpiha näytti koholla olevalta lattialta (Kruna2: 0,5–0,7 m) ja putosi outdoor-joukosta
+        segs = _drop_upper_duplicates(segs, ground_xy=gxy)
         if opt.bush_noise > 0 and not opt.straighten:      # käännetty linja osuu pintaan vain osin
             segs = [s for s in segs if not _bush(s, opt)]
         if opt.fence_top > 0:
@@ -1258,7 +1374,8 @@ def _trim_fences(segs: list[Segment], xyz: np.ndarray, rel: np.ndarray, index: _
         _, sv, tv, hv = _near_points(seg, xyz, rel, index, opt, pad=0.0)
         n = max(1, int(np.ceil(seg.length / step)))
         k = np.clip((sv / step).astype(np.int64), 0, n - 1)
-        # Ylin piste enintään fence_top + 0,6: räystäs ulottuu nurkan yli aidan yläpuolelle, mutta sen alla on tyhjää
+        # Ylin piste enintään fence_top + 0,6: räystäs ulottuu nurkan yli aidan yläpuolelle, mutta sen alla on
+        # tyhjää
         cap = hv < opt.fence_top + 0.6
         top = np.full(n, -np.inf)
         np.maximum.at(top, k[cap], hv[cap])
@@ -1302,11 +1419,37 @@ def _bush(seg: Segment, opt: WallOptions) -> bool:
     return h is not None and noise is not None and h[1] - h[0] < opt.bush_span and noise > opt.bush_noise
 
 
-def _drop_upper_duplicates(segs: list[Segment], side: float = 0.35, angle_deg: float = 10.0) -> list[Segment]:
+def _outside(seg: Segment, gxy: np.ndarray, index: _GridIndex, near: float = 0.4, far: float = 3.0) -> int:
+    """Kummalla puolella linjaa on ulkoalue: +1 normaalin puolella, -1 vastakkaisella, 0 ei tiedetä. Ulkona on
+    maanpintaa (gxy) linjan vieressä, talon sisällä ei (tai vain ikkunoista näkyvää lattiaa)."""
+    lo = np.minimum(seg.p0, seg.p1) - far
+    hi = np.maximum(seg.p0, seg.p1) + far
+    q = gxy[index.box(lo, hi)] - seg.p0
+    sv, tv = q @ seg.direction, q @ seg.normal
+    on = (sv >= 0) & (sv <= seg.length) & (np.abs(tv) >= near) & (np.abs(tv) <= far)
+    plus, minus = int(np.sum(on & (tv > 0))), int(np.sum(on & (tv < 0)))
+    if max(plus, minus) < 20 or max(plus, minus) < 2 * min(plus, minus):
+        return 0
+    return 1 if plus > minus else -1
+
+
+def _comparable(a: Segment, b: Segment) -> bool:
+    """Kaksoislinjat ovat yhtä uskottavia julkisivuja: lyhyempi vähintään puolet pidemmästä eikä kohise selvästi
+    enemmän (Pajalahti: 1,7 m kasvillisuuslinja seinän edessä, kohina 22 mm, ei saa voittaa 5,7 m seinää)."""
+    short, long_ = (a, b) if a.length <= b.length else (b, a)
+    ns, nl = short.info.get("kohina"), long_.info.get("kohina")
+    return short.length >= 0.5 * long_.length and (ns is None or nl is None or ns <= nl + 0.005)
+
+
+def _drop_upper_duplicates(segs: list[Segment], side: float = 0.35, angle_deg: float = 10.0,
+                           ground_xy: np.ndarray | None = None) -> list[Segment]:
     """Rinnakkaiset kaksoislinjat (enintään side sivussa, lyhyempi vähintään puoliksi toisen kohdalla) samasta
     seinästä: ikkunanauha tai seinän yläosa julkisivun takana. Jäljelle jää linja, jonka julkisivu alkaa
-    alempaa (wall_info: korkeus), sitten linja lähempänä julkisivua (pinta), sitten pidempi. Alle 5 cm
-    toisistaan olevat ovat samaa pintaa: pidempi jää. Nurkkien liitospalat (ilman tietoja) säilyvät."""
+    alempaa (wall_info: korkeus), sitten linja lähempänä julkisivua (pinta), sitten ulompi (ground_xy:
+    maanpinta kertoo ulkopuolen; Kruna2: täyskorkeiden ikkunasyvennysten pohjista koottu pidempi linja
+    0,33 m julkisivun takana), sitten pidempi. Alle 5 cm toisistaan olevat ovat samaa pintaa: pidempi jää.
+    Nurkkien liitospalat (ilman tietoja) säilyvät."""
+    gindex = _GridIndex(ground_xy, 1.0) if ground_xy is not None and len(ground_xy) else None
     cos_lim = np.cos(np.radians(angle_deg))
     drop = set()
     order = sorted(range(len(segs)), key=lambda k: -segs[k].length)
@@ -1336,6 +1479,10 @@ def _drop_upper_duplicates(segs: list[Segment], side: float = 0.35, angle_deg: f
                 loser = j if hb > ha else i
             elif abs(pa - pb) > 0.03:          # linja kauempana julkisivusta (esim. lasin tasossa)
                 loser = j if pb > pa else i
+            elif gindex is not None and (out := _outside(long_, ground_xy, gindex)) != 0 and _comparable(a, b):
+                # ulompi jää: sisempi on syvennysten (ikkunat, ovet) pohjista koottu
+                oa, ob = (a.p0 + a.p1) / 2 @ n * out, (b.p0 + b.p1) / 2 @ n * out
+                loser = i if oa < ob else j
             else:
                 loser = j if b is short else i
             drop.add(loser)
@@ -1640,6 +1787,86 @@ def _signed_distances_numpy(xy, p0, p1, normals, max_dist):
         rank, val = _closest(xy[cand], np.tile(a, (m, 1)), np.tile(b - a, (m, 1)), np.tile(n, (m, 1)))
         better = (rank < best[cand]) & (np.abs(val) <= max_dist)
         best[cand[better]], out[cand[better]] = rank[better], val[better]
+    return out
+
+
+# --- Iso pilvi ruuduittain (lidarpipe walls-tiled ja QGIS-lisäosan ruutuajo): ruudut luetaan limittäin, ja
+# kustakin pidetään linjat, joiden keskipiste on ruudun ytimessä; saumojen tuplat ja aidat (kattosuodatin) pois.
+
+def tile_core(segs: list[Segment], base: np.ndarray, tile: float,
+              margin: float = 2.0) -> list[tuple[Segment, float]]:
+    """Ruudun (paikalliset koordinaatit, ydin 0..tile) linjat, joiden keskipiste on ytimessä tai enintään margin
+    sen ulkopuolella, siirrettynä base:lla ja keskipisteen syvyys ytimessä (m, + = sisällä). Pisteet
+    harvennetaan 5 cm:iin: ne kertovat DXF:ään mitatun ja päätellyn osan (measured_pieces, aukko yli 0,5 m)."""
+    base = np.asarray(base, float)[:2]
+    out = []
+    for s in segs:
+        m = (s.p0[:2] + s.p1[:2]) / 2
+        depth = float(min(m[0], m[1], tile - m[0], tile - m[1]))
+        if depth <= -margin:
+            continue                       # limitysalueen linja kuuluu naapuriruudulle
+        s.p0 = s.p0 + np.r_[base, np.zeros(len(s.p0) - 2)]
+        s.p1 = s.p1 + np.r_[base, np.zeros(len(s.p1) - 2)]
+        pts = s.points[:, :2]
+        _, first = np.unique(np.floor(pts / 0.05).astype(np.int64), axis=0, return_index=True)
+        s.points = pts[np.sort(first)] + base
+        out.append((s, depth))
+    return out
+
+
+def drop_seam_duplicates(found: dict, margin: float = 2.0, side: float = 0.2,
+                         angle_deg: float = 5.0) -> list[Segment]:
+    """Ruutujen rajalla sama seinä voi löytyä kahdesta ruudusta (keskipiste rajan kummallakin puolella
+    pyöristyksen tai hieman eri päätepisteiden takia). found: {ruutu: tile_core-tulos}. Reunavaran linjoista
+    pidetään päällekkäisistä se, jonka keskipiste on syvemmällä omassa ruudussaan (vaikka se olisi hieman ytimen
+    ulkopuolella); ilman vastinetta reunavaran linja pidetään vain, jos sen keskipiste on ytimessä."""
+    items = [(k, s, d) for k in sorted(found) for s, d in found[k]]
+    edge = [i for i, (_, _, d) in enumerate(items) if d < margin]
+    drop, won = set(), set()
+    cos = np.cos(np.radians(angle_deg))
+    for a in edge:
+        ka, sa, da = items[a]
+        for b in edge:
+            kb, sb, db = items[b]
+            if kb == ka or (db, b) <= (da, a):
+                continue                  # vain syvempi b voi pudottaa a:n
+            if abs(sa.direction @ sb.direction) < cos:
+                continue
+            mb = (sb.p0 + sb.p1) / 2
+            if abs(sa.normal @ (mb - (sa.p0 + sa.p1) / 2)) > side:
+                continue
+            ta = sorted((sa.p0 @ sa.direction, sa.p1 @ sa.direction))
+            tb = sorted((sb.p0 @ sa.direction, sb.p1 @ sa.direction))
+            if min(ta[1], tb[1]) - max(ta[0], tb[0]) > 0.5 * min(sa.length, sb.length):
+                drop.add(a)
+                won.add(b)
+                break
+    return [s for i, (_, s, d) in enumerate(items) if i not in drop and (d >= 0 or i in won)]
+
+
+def roof_share(segs: list[Segment], roof: np.ndarray, cell: float, dist: float, offset=(0.0, 0.0),
+               step: float = 0.25) -> np.ndarray:
+    """Osuus kunkin linjan pituudesta, jonka dist-säteellä on kattoa. roof: kattorasteri (bool, x, y), solu
+    cell, origo = linjojen koordinaatit + offset. Ilmakeilauksen katot erottavat seinät aidoista ja muureista,
+    joilla ei ole kattoa vieressä (seinä on räystään alla). Ilman scipyä (QGIS:n Python)."""
+    r = int(np.ceil(dist / cell))
+    near = np.zeros_like(roof, dtype=bool)
+    nx, ny = roof.shape
+    for di in range(-r, r + 1):
+        for dj in range(-r, r + 1):
+            if di * di + dj * dj > r * r:
+                continue
+            near[max(0, di):nx + min(0, di), max(0, dj):ny + min(0, dj)] |= \
+                roof[max(0, -di):nx + min(0, -di), max(0, -dj):ny + min(0, -dj)]
+    out = np.zeros(len(segs))
+    for i, s in enumerate(segs):
+        n = max(2, int(np.ceil(s.length / step)) + 1)
+        p = s.p0[:2] + np.linspace(0, 1, n)[:, None] * (s.p1[:2] - s.p0[:2]) + np.asarray(offset, float)
+        q = np.floor(p / cell).astype(np.int64)
+        inside = (q[:, 0] >= 0) & (q[:, 0] < nx) & (q[:, 1] >= 0) & (q[:, 1] < ny)
+        hit = np.zeros(n, bool)
+        hit[inside] = near[q[inside, 0], q[inside, 1]]
+        out[i] = hit.mean()
     return out
 
 
