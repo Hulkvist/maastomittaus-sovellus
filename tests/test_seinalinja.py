@@ -969,3 +969,45 @@ def test_yhdista_saman_viivan_paat_sulkee():
     uusi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "leikkaus", "viiva1": "U", "viiva2": "U"}])
     u = uusi["viivat"][0]
     assert u["suljettu"] and karjet_xy(u) == [(5, 12.5), (2, 5), (0, 0), (10, 0), (8, 5)]
+
+
+
+def test_sovella_muokkaukset_laskettu_piste():
+    tulos = _viivat(A=[(0, 0), (10, 0)])
+    m = {"tyyppi": "piste", "nimi": "L1", "e": E0 + 5, "n": N0 + 2, "a": "x", "b": "y", "a_mitta": 5, "b_mitta": -2}
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    assert uusi["lasketut_pisteet"] == [{"nimi": "L1", "e": E0 + 5, "n": N0 + 2}]
+    assert karjet_xy(uusi["viivat"][0]) == [(0, 0), (10, 0)] and not uusi["varoitukset"]
+    # kärki raahattu laskettuun pisteeseen: laji laskettu
+    siirto = {"tyyppi": "siirra", "viiva": "A", "karki": 1, "e": E0 + 5, "n": N0 + 2, "z": None, "nimi": "L1",
+              "laji": "laskettu"}
+    k = sl.sovella_muokkaukset(tulos, [m, siirto])["viivat"][0]["karjet"][1]
+    assert (k["nimi"], k["laji"]) == ("L1", "laskettu")
+
+def test_suorakulmion_neljas():
+    r = sl.suorakulmion_neljas((E0, N0 + 6), (E0 + 10, N0), (E0, N0))
+    assert r["jarjestys"] == [0, 2, 1] and r["neljas"] == pytest.approx((E0 + 10, N0 + 6))
+    assert r["kulma"] == pytest.approx(90) and r["lavistajaero"] == pytest.approx(0)
+    # 1° vino hyväksytään, lävistäjät eroavat
+    vino = sl.suorakulmion_neljas((E0, N0), (E0 + 10, N0), (E0 + 6 * math.sin(math.radians(1)), N0 + 6))
+    assert vino["jarjestys"][1] == 0 and abs(vino["kulma"] - 90) == pytest.approx(1, abs=0.01)
+    assert vino["lavistajaero"] > 0.1
+    with pytest.raises(ValueError, match="suorakulmiota"):
+        sl.suorakulmion_neljas((E0, N0), (E0 + 10, N0), (E0 + 6 * math.sin(math.radians(10)), N0 + 6))
+
+
+def test_sovella_muokkaukset_suorakulmio():
+    def karjet(*xy):
+        return [{"e": E0 + x, "n": N0 + y, "z": None, "nimi": None, "laji": "laskettu"} for x, y in xy]
+    # kolmen kulman avoin viiva (kulma lopussa) suljetaan kehän järjestyksessä
+    tulos = _viivat(A=[(10, 0), (0, 0), (10, 6)], B=[(30, 0), (40, 0)])
+    m = {"tyyppi": "suorakulmio", "nimi": "Suorakulmio 1", "pohja": "A",
+         "karjet": karjet((0, 0), (10, 0), (10, 6), (0, 6))}
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    a = uusi["viivat"][0]
+    assert a["suljettu"] and karjet_xy(a) == [(0, 0), (10, 0), (10, 6), (0, 6)] and a["karjet"][0]["nimi"] == "A1"
+    assert len(uusi["viivat"]) == 2
+    # muuten uusi suljettu viiva
+    m["karjet"] = karjet((30, 0), (40, 0), (40, 5), (30, 5))
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    assert [v["nimi"] for v in uusi["viivat"]] == ["A", "B", "Suorakulmio 1"] and uusi["viivat"][2]["suljettu"]

@@ -225,7 +225,9 @@ def test_seinalinjan_muokkaus_dxf_ja_tallennus(monkeypatch):
         at.run()
         [t for t in at.toggle if t.label == "Muokkaa viivaa kartalla"][0].set_value(True).run()
         assert not virheet(at), virheet(at)
-        assert any(b.label == "Lisää kärki" for b in at.button)
+        [b for b in at.button if b.label == "Lisää piste"][0].click().run()
+        assert not virheet(at), virheet(at)
+        assert any("laskettu piste L1" in c.value for c in at.caption)
         avain = "_sl_muokkaukset_" + hashlib.sha1(tiedosto.getvalue()).hexdigest()
         tila = at.session_state[avain]
         viiva = jx.muodosta_seinalinja(jx.jasenna_tyo(tiedosto.getvalue(), "testi2.jxl")[1])["viivat"][0]

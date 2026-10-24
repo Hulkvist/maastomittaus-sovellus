@@ -57,3 +57,19 @@ def test_piirretty_uusi_viiva():
     uusi = sl.sovella_muokkaukset(tulos, [m])
     assert uusi["viivat"][-1]["suljettu"] and len(uusi["viivat"][-1]["karjet"]) == 3
     assert "uusi suljettu viiva (3 kärkeä)" in slm.kuvaus(m)
+
+
+def test_laskettu_piste_napsahduskohteena():
+    tulos, pisteet = _tulos()
+    viiva = tulos["viivat"][0]["nimi"]
+    m = {"tyyppi": "piste", "nimi": "L1", "e": E0 + 5.0, "n": N0 - 2.0, "a": "Piste 1 (8)", "b": "Piste 2 (5)",
+         "a_mitta": 5.0, "b_mitta": 2.0}
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    kohteet = slm.napsahduspisteet(pisteet, uusi)
+    assert kohteet[-1] == ("L1", sl.LASKETTU_KOODI, E0 + 5.0, N0 - 2.0, None)
+    s = slm.muokkaukseksi({"tyyppi": "siirra", "viiva": viiva, "karki": 1, "piste": len(kohteet) - 1}, uusi, kohteet)
+    assert (s["e"], s["n"], s["nimi"], s["laji"]) == (E0 + 5.0, N0 - 2.0, "L1", "laskettu")
+    u = slm.muokkaukseksi({"tyyppi": "uusi_viiva", "karjet": [{"piste": 0}, {"piste": len(kohteet) - 1}]},
+                          uusi, kohteet)
+    assert [k["laji"] for k in u["karjet"]] == ["mitattu", "laskettu"]
+    assert "laskettu piste L1" in slm.kuvaus(m)

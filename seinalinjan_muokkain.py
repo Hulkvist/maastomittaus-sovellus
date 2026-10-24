@@ -36,6 +36,7 @@ _CSS = """
 _JS = """
 const LEAFLET = "%(leaflet)s";
 const NAPSAHDUS_PX = %(napsahdus)d;
+const LASKETTU_KOODI = "%(laskettu)s";
 
 async function lataaLeaflet() {
   if (!document.getElementById("slm-leaflet-css")) {
@@ -207,7 +208,9 @@ export default async function (component) {
   };
 
   pisteet.forEach((p, i) => {
-    L.circleMarker([p[0], p[1]], { radius: 4, color: "#1f77b4", weight: 1, fillOpacity: 0.9 })
+    const laskettu = p[3] === LASKETTU_KOODI;   // suorakulmaisella mittauksella laskettu piste
+    L.circleMarker([p[0], p[1]], { radius: laskettu ? 5 : 4, color: laskettu ? "#d62728" : "#1f77b4", weight: 1,
+                                   fillOpacity: 0.9 })
       .bindTooltip(String(p[2]), { permanent: true, direction: "right", className: "slm-nimi", offset: [4, 0] })
       .on("click", (e) => {
         if (!tila.piirto.paalla) return;
@@ -288,7 +291,7 @@ export default async function (component) {
   }
   setTimeout(() => kartta.invalidateSize(), 0);
 }
-""" % {"leaflet": LEAFLET, "napsahdus": NAPSAHDUS_PX}
+""" % {"leaflet": LEAFLET, "napsahdus": NAPSAHDUS_PX, "laskettu": sl.LASKETTU_KOODI}
 
 _KOMPONENTIT = {}
 
@@ -305,10 +308,12 @@ def _komponentti():
     return _KOMPONENTIT[avain]
 
 
-def napsahduspisteet(pisteet):
-    """Mitatut pisteet, joihin kärki voi napsahtaa: [(nimi, koodi, e, n, korkeus)]."""
-    return [(p.get("nimi"), p.get("koodi"), p["e"], p["n"], p.get("korkeus"))
-            for p in pisteet if p.get("e") is not None and p.get("n") is not None]
+def napsahduspisteet(pisteet, tulos=None):
+    """Mitatut pisteet ja seinälinjan (tulos) lasketut pisteet, joihin kärki voi napsahtaa:
+    [(nimi, koodi, e, n, korkeus)]; laskettujen koodi on seinalinja.LASKETTU_KOODI."""
+    return ([(p.get("nimi"), p.get("koodi"), p["e"], p["n"], p.get("korkeus"))
+             for p in pisteet if p.get("e") is not None and p.get("n") is not None]
+            + [(p["nimi"], sl.LASKETTU_KOODI, p["e"], p["n"], None) for p in (tulos or {}).get("lasketut_pisteet", [])])
 
 
 def _taustat(api_key, helsinki):
@@ -353,14 +358,15 @@ def _3879(lat, lon):
 def _koordinaatit(sijainti, tulos, kohteet):
     """Kartan sijainti (mitattu piste, viivan kärki tai lat/lon) -> {"e", "n", "z", "nimi"} EPSG:3879:ssä."""
     if sijainti.get("piste") is not None:
-        nimi, _, e, n, z = kohteet[int(sijainti["piste"])]
-        return {"e": e, "n": n, "z": z, "nimi": str(nimi)}
+        nimi, koodi, e, n, z = kohteet[int(sijainti["piste"])]
+        return {"e": e, "n": n, "z": z, "nimi": str(nimi),
+                "laji": "laskettu" if koodi == sl.LASKETTU_KOODI else "mitattu"}
     if sijainti.get("kohde_viiva") is not None:
         viiva = next(v for v in tulos["viivat"] if v["nimi"] == sijainti["kohde_viiva"])
         k = viiva["karjet"][int(sijainti["kohde_karki"])]
-        return {"e": k["e"], "n": k["n"], "z": k.get("z"), "nimi": str(k.get("nimi") or "")}
+        return {"e": k["e"], "n": k["n"], "z": k.get("z"), "nimi": str(k.get("nimi") or ""), "laji": k.get("laji")}
     e, n = _3879(sijainti["lat"], sijainti["lon"])
-    return {"e": round(e, 3), "n": round(n, 3), "z": None, "nimi": None}
+    return {"e": round(e, 3), "n": round(n, 3), "z": None, "nimi": None, "laji": None}
 
 
 def muokkaukseksi(tapahtuma, tulos, kohteet, uuden_nimi="Uusi viiva"):
@@ -369,7 +375,7 @@ def muokkaukseksi(tapahtuma, tulos, kohteet, uuden_nimi="Uusi viiva"):
     if tapahtuma["tyyppi"] == "uusi_viiva":
         karjet = [_koordinaatit(s, tulos, kohteet) for s in tapahtuma["karjet"]]
         for k in karjet:
-            k["laji"] = "mitattu" if k["nimi"] else "käsin"
+            k["laji"] = k["laji"] or ("mitattu" if k["nimi"] else "käsin")
         return {"tyyppi": "uusi_viiva", "nimi": uuden_nimi, "suljettu": bool(tapahtuma.get("suljettu")),
                 "pohja": tulos["viivat"][0]["nimi"] if tulos["viivat"] else None, "karjet": karjet}
     if tapahtuma["tyyppi"] in ("jatka", "leikkaus"):
@@ -402,4 +408,8 @@ def kuvaus(m):
         return f"{m['viiva1']} ja {m['viiva2']} yhdistetty leikkauspisteessä"
     if m["tyyppi"] == "uusi_viiva":
         return f"{m['nimi']}: uusi {'suljettu ' if m.get('suljettu') else ''}viiva ({len(m['karjet'])} kärkeä)"
+    if m["tyyppi"] == "piste":
+        return f"laskettu piste {m['nimi']} (A {m['a']}, B {m['b']}, a {m['a_mitta']:g} m, b {m['b_mitta']:g} m)"
+    if m["tyyppi"] == "suorakulmio":
+        return "kolmesta kulmasta täydennetty suorakulmio"
     return str(m)
