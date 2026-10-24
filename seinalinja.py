@@ -2188,6 +2188,75 @@ def suorakulmainen_piste(a, b, a_mitta, b_mitta):
     return (a[0] + a_mitta * ue + b_mitta * un, a[1] + a_mitta * un - b_mitta * ue)
 
 
+SAMA_PISTE_M = 0.001        # mitattu piste on viivan kärki, jos koordinaatit täsmäävät näin tarkasti
+
+
+def _lisayksen_hinta(viiva, jalkeen, piste):
+    """Paljonko viivan pituus kasvaa, kun piste lisätään kärjen "jalkeen" jälkeen (-1 = alkuun)."""
+    k, n = viiva["karjet"], len(viiva["karjet"])
+    edellinen = k[jalkeen] if jalkeen >= 0 else (k[-1] if viiva["suljettu"] else None)
+    seuraava = k[jalkeen + 1] if jalkeen + 1 < n else (k[0] if viiva["suljettu"] else None)
+    pit = [math.hypot(piste[0] - x["e"], piste[1] - x["n"]) for x in (edellinen, seuraava) if x]
+    if len(pit) < 2:
+        return pit[0]
+    return sum(pit) - math.hypot(seuraava["e"] - edellinen["e"], seuraava["n"] - edellinen["n"])
+
+
+def kohta_viivassa(tulos, a, piste, viite=None):
+    """Suorakulmaisen mittauksen uuden kärjen paikka: (viiva, jalkeen) sovella_muokkaukset-lisäykselle.
+    Jos A on viivan kärki (viite = (viiva, indeksi) tai koordinaatit täsmäävät), piste tulee A:n viereen
+    (avoimen viivan päässä myös jatkeeksi) sille puolelle, jossa viiva pitenee vähemmän; muuten lähimpään
+    viivaan kohtaan, jossa viiva pitenee vähiten."""
+    viivat = [v for v in tulos["viivat"] if v["karjet"]]
+    if not viivat:
+        raise ValueError("Viivoja ei ole.")
+    if viite is None:
+        viite = next(((v["nimi"], j) for v in viivat for j, k in enumerate(v["karjet"])
+                      if math.hypot(k["e"] - a[0], k["n"] - a[1]) <= SAMA_PISTE_M), None)
+    if viite:
+        v = next(x for x in viivat if x["nimi"] == viite[0])
+        j = viite[1]
+        kohdat = [j - 1, j]
+        if v["suljettu"] and j == 0:
+            kohdat = [len(v["karjet"]) - 1, 0]
+        ehdokkaat = [(v, i) for i in kohdat]
+    else:
+        ehdokkaat = [(v, i) for v in viivat
+                     for i in range(0 if v["suljettu"] else -1, len(v["karjet"]))]
+    v, i = min(ehdokkaat, key=lambda vi: _lisayksen_hinta(vi[0], vi[1], piste))
+    return v["nimi"], i
+
+
+SUORAKULMIO_MAX_KULMA = 3.0   # kolmen kulman suora kulma saa poiketa 90°:sta enintään näin paljon
+
+
+def suorakulmion_neljas(p1, p2, p3):
+    """Kolmesta talon kulmasta (e, n) suorakulmion neljäs: {"jarjestys": kolmen pisteen indeksit kehän
+    järjestyksessä (suora kulma keskellä), "neljas": (e, n), "kulma": suoran kulman asteet,
+    "lavistajaero": lävistäjien pituusero (m)}. Neljäs = kahden muun summa - kulmapiste, mitatut kulmat
+    pysyvät ennallaan. ValueError, jos mikään kulma ei ole SUORAKULMIO_MAX_KULMA:n päässä 90°:sta."""
+    p = [p1, p2, p3]
+    paras = None
+    for c in range(3):
+        a, b = [i for i in range(3) if i != c]
+        u = (p[a][0] - p[c][0], p[a][1] - p[c][1])
+        w = (p[b][0] - p[c][0], p[b][1] - p[c][1])
+        if min(math.hypot(*u), math.hypot(*w)) < 1e-6:
+            raise ValueError("Kaksi kulmaa on samassa kohdassa.")
+        kulma = math.degrees(math.acos(max(-1.0, min(1.0, (u[0] * w[0] + u[1] * w[1])
+                                                     / (math.hypot(*u) * math.hypot(*w))))))
+        if paras is None or abs(kulma - 90) < abs(paras[0] - 90):
+            paras = (kulma, a, c, b)
+    kulma, a, c, b = paras
+    if abs(kulma - 90) > SUORAKULMIO_MAX_KULMA:
+        raise ValueError(f"Pisteet eivät muodosta suorakulmiota: lähin kulma on {kulma:.1f}° (sallittu "
+                         f"90 ± {SUORAKULMIO_MAX_KULMA:g}°).")
+    neljas = (p[a][0] + p[b][0] - p[c][0], p[a][1] + p[b][1] - p[c][1])
+    lavistajaero = abs(math.hypot(p[a][0] - p[b][0], p[a][1] - p[b][1])
+                       - math.hypot(p[c][0] - neljas[0], p[c][1] - neljas[1]))
+    return {"jarjestys": [a, c, b], "neljas": neljas, "kulma": kulma, "lavistajaero": lavistajaero}
+
+
 MUOKKAUS_MAX_M = 30.0      # jatke ja leikkauspiste enintään näin kaukana viivan päästä
 LEIKKAUS_MIN_KULMA = 10.0  # päätejanojen pienin kulma yhdistyksessä (lähes yhdensuuntaiset: leikkaus kaukana)
 
@@ -2283,6 +2352,9 @@ def sovella_muokkaukset(tulos, muokkaukset):
       {"tyyppi": "leikkaus", "viiva1", "viiva2", "paa1", "paa2"} -- kahden avoimen viivan päätejanat
           leikkauspisteeseen (päätä lyhennetään tai leikkauspiste lisätään) ja viivat yhdeksi (sama viiva:
           suljetaan); päät None = lähimmät päät
+      {"tyyppi": "suorakulmio", "nimi", "pohja", "karjet": [4 kärkeä kehän järjestyksessä]} -- kolmesta kulmasta
+          täydennetty suorakulmio: jos avoimen viivan kärjet ovat juuri kolme ensimmäistä, viiva suljetaan
+          neljännellä kärjellä; muuten uusi suljettu viiva "nimi" viivan "pohja" tasolle
     Muokkaus, joka ei enää osu (viiva tai kärki puuttuu), ohitetaan ja siitä tulee varoitus."""
     import copy
 
@@ -2373,6 +2445,25 @@ def sovella_muokkaukset(tulos, muokkaukset):
             viiva = {"nimi": m["nimi"], "karjet": [dict(karki(k, k.get("laji") or "laskettu")) for k in m["karjet"]],
                      "suljettu": bool(m.get("suljettu")) and len(m["karjet"]) >= 3, "numero": None,
                      "avain": pohja["avain"] if pohja else ("", (), 1)}
+            uusi["viivat"].append(viiva)
+            viivat[viiva["nimi"]] = viiva
+            continue
+        if tyyppi == "suorakulmio":
+            kolme = m["karjet"][:3]
+
+            def kohdalla(k, x):
+                return math.hypot(k["e"] - x["e"], k["n"] - x["n"]) <= SAMA_PISTE_M
+
+            avoin = next((v for v in uusi["viivat"] if not v["suljettu"] and len(v["karjet"]) == 3
+                          and all(any(kohdalla(k, x) for k in v["karjet"]) for x in kolme)), None)
+            if avoin:   # kolmen kulman viiva suljetaan; kärjet kehän järjestykseen
+                avoin["karjet"] = [dict(next(k for k in avoin["karjet"] if kohdalla(k, x)), bulge=0.0)
+                                   for x in kolme] + [karki(m["karjet"][3], "laskettu")]
+                avoin["suljettu"] = True
+                continue
+            pohja = viivat.get(m.get("pohja")) or (uusi["viivat"][0] if uusi["viivat"] else None)
+            viiva = {"nimi": m["nimi"], "karjet": [karki(k, k.get("laji") or "laskettu") for k in m["karjet"]],
+                     "suljettu": True, "numero": None, "avain": pohja["avain"] if pohja else ("", (), 1)}
             uusi["viivat"].append(viiva)
             viivat[viiva["nimi"]] = viiva
             continue

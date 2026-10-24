@@ -402,4 +402,6 @@ def kuvaus(m):
         return f"{m['viiva1']} ja {m['viiva2']} yhdistetty leikkauspisteessä"
     if m["tyyppi"] == "uusi_viiva":
         return f"{m['nimi']}: uusi {'suljettu ' if m.get('suljettu') else ''}viiva ({len(m['karjet'])} kärkeä)"
+    if m["tyyppi"] == "suorakulmio":
+        return "kolmesta kulmasta täydennetty suorakulmio"
     return str(m)

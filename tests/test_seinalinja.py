@@ -969,3 +969,56 @@ def test_yhdista_saman_viivan_paat_sulkee():
     uusi = sl.sovella_muokkaukset(tulos, [{"tyyppi": "leikkaus", "viiva1": "U", "viiva2": "U"}])
     u = uusi["viivat"][0]
     assert u["suljettu"] and karjet_xy(u) == [(5, 12.5), (2, 5), (0, 0), (10, 0), (8, 5)]
+
+
+def test_kohta_viivassa_a_n_viereen():
+    tulos = _viivat(A=[(0, 0), (10, 0), (10, 8), (0, 8)])
+    tulos["viivat"][0]["suljettu"] = True
+    a = (E0 + 10, N0)
+    # A = kärki 2: piste janalla kärki 2 - kärki 3 -> sen janan väliin (kärjen 2 jälkeen)
+    assert sl.kohta_viivassa(tulos, a, (E0 + 10.2, N0 + 4), ("A", 1)) == ("A", 1)
+    # A = kärki 2: piste janan kärki 1 - kärki 2 puolella -> kärjen 1 jälkeen
+    assert sl.kohta_viivassa(tulos, a, (E0 + 6, N0 - 0.3), ("A", 1)) == ("A", 0)
+    # suljetun viivan ensimmäinen kärki: edellinen jana on viimeinen
+    assert sl.kohta_viivassa(tulos, (E0, N0), (E0 - 0.2, N0 + 4), ("A", 0)) == ("A", 3)
+    # A mitattu piste kärjen kohdalla tunnistetaan kärjeksi ilman viitettä
+    assert sl.kohta_viivassa(tulos, a, (E0 + 10.2, N0 + 4)) == ("A", 1)
+
+
+def test_kohta_viivassa_avoimen_paa_ja_irrallinen_a():
+    tulos = _viivat(A=[(0, 0), (10, 0), (10, 8)], B=[(30, 0), (40, 0)])
+    # avoimen viivan loppu: piste viivan jatkeella -> loppuun
+    assert sl.kohta_viivassa(tulos, (E0 + 10, N0 + 8), (E0 + 4, N0 + 8), ("A", 2)) == ("A", 2)
+    # alku: piste ennen alkua -> alkuun
+    assert sl.kohta_viivassa(tulos, (E0, N0), (E0, N0 + 3), ("A", 0)) == ("A", -1)
+    # A ei ole kärki -> lähin viiva ja jana
+    assert sl.kohta_viivassa(tulos, (E0 + 50, N0 + 50), (E0 + 35, N0 + 0.1)) == ("B", 0)
+
+
+def test_suorakulmion_neljas():
+    r = sl.suorakulmion_neljas((E0, N0 + 6), (E0 + 10, N0), (E0, N0))
+    assert r["jarjestys"] == [0, 2, 1] and r["neljas"] == pytest.approx((E0 + 10, N0 + 6))
+    assert r["kulma"] == pytest.approx(90) and r["lavistajaero"] == pytest.approx(0)
+    # 1° vino hyväksytään, lävistäjät eroavat
+    vino = sl.suorakulmion_neljas((E0, N0), (E0 + 10, N0), (E0 + 6 * math.sin(math.radians(1)), N0 + 6))
+    assert vino["jarjestys"][1] == 0 and abs(vino["kulma"] - 90) == pytest.approx(1, abs=0.01)
+    assert vino["lavistajaero"] > 0.1
+    with pytest.raises(ValueError, match="suorakulmiota"):
+        sl.suorakulmion_neljas((E0, N0), (E0 + 10, N0), (E0 + 6 * math.sin(math.radians(10)), N0 + 6))
+
+
+def test_sovella_muokkaukset_suorakulmio():
+    def karjet(*xy):
+        return [{"e": E0 + x, "n": N0 + y, "z": None, "nimi": None, "laji": "laskettu"} for x, y in xy]
+    # kolmen kulman avoin viiva (kulma lopussa) suljetaan kehän järjestyksessä
+    tulos = _viivat(A=[(10, 0), (0, 0), (10, 6)], B=[(30, 0), (40, 0)])
+    m = {"tyyppi": "suorakulmio", "nimi": "Suorakulmio 1", "pohja": "A",
+         "karjet": karjet((0, 0), (10, 0), (10, 6), (0, 6))}
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    a = uusi["viivat"][0]
+    assert a["suljettu"] and karjet_xy(a) == [(0, 0), (10, 0), (10, 6), (0, 6)] and a["karjet"][0]["nimi"] == "A1"
+    assert len(uusi["viivat"]) == 2
+    # muuten uusi suljettu viiva
+    m["karjet"] = karjet((30, 0), (40, 0), (40, 5), (30, 5))
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    assert [v["nimi"] for v in uusi["viivat"]] == ["A", "B", "Suorakulmio 1"] and uusi["viivat"][2]["suljettu"]

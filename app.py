@@ -10,6 +10,7 @@ Käyttö:
 """
 
 import collections
+import copy
 import hashlib
 import math
 import os
@@ -550,7 +551,8 @@ def _seinalinjan_kantakartta(pisteet):
 
 def _seinalinjan_muokkaukset(raaka_bytes):
     """Tiedoston seinälinjan käsin tehdyt muokkaukset istunnossa: {"pohja": automaattisen viivan
-    tunniste, "muokkaukset": [...]} (seinalinja.sovella_muokkaukset)."""
+    tunniste, "pohja_tulos": lukittu automaattinen viiva, "muokkaukset": [...]}
+    (seinalinja.sovella_muokkaukset)."""
     avain = "_sl_muokkaukset_" + hashlib.sha1(raaka_bytes).hexdigest()
     return st.session_state.setdefault(avain, {"pohja": None, "muokkaukset": []})
 
@@ -628,11 +630,13 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     with st.container(border=True):
         st.markdown("**Suorakulmainen mittaus**")
         st.caption("A ja B = mitattu piste tai viivan kärki. a-mitta pitkin linjaa A→B pisteestä A, b-mitta "
-                   "kohtisuoraan: + oikealle (A:sta B:hen katsottuna), − vasemmalle.")
-        valinnat = {f"Piste {nimi} ({koodi or '-'})": (e, n, z, str(nimi)) for nimi, koodi, e, n, z in kohteet}
+                   "kohtisuoraan: + oikealle (A:sta B:hen katsottuna), − vasemmalle. Uusi kärki menee viivaan "
+                   "A:n viereen (A:n viivaan tai, jos A ei ole kärki, lähimpään viivaan).")
+        valinnat = {f"Piste {nimi} ({koodi or '-'})": (e, n, z, str(nimi), None) for nimi, koodi, e, n, z in kohteet}
         for v in sl_tulos["viivat"]:
             for j, k in enumerate(v["karjet"]):
-                valinnat[f"{v['nimi']}: kärki {j + 1} ({k.get('nimi')})"] = (k["e"], k["n"], k.get("z"), None)
+                valinnat[f"{v['nimi']}: kärki {j + 1} ({k.get('nimi')})"] = (k["e"], k["n"], k.get("z"), None,
+                                                                             (v["nimi"], j))
         nimet = list(valinnat)
         if len(nimet) < 2:
             st.caption("Pisteitä on liian vähän.")
@@ -650,17 +654,12 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
         try:
             if toiminto == "Uusi kärki viivaan":
                 e, n = sl.suorakulmainen_piste(A[:2], B[:2], a_mitta, b_mitta)
-                st.caption(f"Laskettu piste: E {e:.3f}  N {n:.3f}")
-                viivanimet = [v["nimi"] for v in sl_tulos["viivat"]]
-                sarakkeet = st.columns(2)
-                kohde = sarakkeet[0].selectbox("Viiva", viivanimet,
-                                               index=viivanimet.index(valittu) if valittu in viivanimet else 0,
-                                               key="sl_suora_viiva")
+                kohde, jalkeen = sl.kohta_viivassa(sl_tulos, A[:2], (e, n), A[4])
                 karjet = next(v for v in sl_tulos["viivat"] if v["nimi"] == kohde)["karjet"]
-                kohdat = ["alkuun"] + [f"kärjen {j + 1} ({k.get('nimi')}) jälkeen" for j, k in enumerate(karjet)]
-                kohta = sarakkeet[1].selectbox("Kohta", kohdat, index=len(kohdat) - 1, key="sl_suora_kohta")
+                kohta = "alkuun" if jalkeen < 0 else f"kärjen {jalkeen + 1} ({karjet[jalkeen].get('nimi')}) jälkeen"
+                st.caption(f"Laskettu piste: E {e:.3f}  N {n:.3f} → {kohde}, {kohta}")
                 if st.button("Lisää kärki", key="sl_suora_lisaa"):
-                    tila["muokkaukset"].append({"tyyppi": "lisaa", "viiva": kohde, "jalkeen": kohdat.index(kohta) - 1,
+                    tila["muokkaukset"].append({"tyyppi": "lisaa", "viiva": kohde, "jalkeen": jalkeen,
                                                 "e": round(e, 3), "n": round(n, 3), "z": None,
                                                 "nimi": f"a{a_mitta:g} b{b_mitta:g}", "laji": "laskettu"})
                     st.rerun()
@@ -676,6 +675,35 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
                         "karjet": [{"e": round(x, 3), "n": round(y, 3), "z": None, "nimi": f"b{b_mitta:g}",
                                     "laji": "laskettu"} for x, y in (alku, loppu)]})
                     st.rerun()
+        except ValueError as e:
+            st.warning(str(e))
+
+    with st.container(border=True):
+        st.markdown("**Täydennä suorakulmioksi**")
+        st.caption("Kolme mitattua talon kulmaa → neljäs kulma lasketaan. Suora kulma päätellään pisteistä; sen "
+                   f"pitää olla 90 ± {sl.SUORAKULMIO_MAX_KULMA:g}°. Jos kolme kulmaa ovat avoimen viivan kaikki "
+                   "kärjet, viiva suljetaan; muuten syntyy uusi suljettu viiva.")
+        sarakkeet = st.columns(3)
+        kulmat = [sarakkeet[i].selectbox(f"Kulma {i + 1}", nimet, index=min(i, len(nimet) - 1),
+                                         key=f"sl_suorakulmio_{i}") for i in range(3)]
+        try:
+            if len(set(kulmat)) < 3:
+                raise ValueError("Valitse kolme eri pistettä.")
+            p = [valinnat[x] for x in kulmat]
+            r = sl.suorakulmion_neljas(*(x[:2] for x in p))
+            st.caption(f"Suora kulma pisteessä {kulmat[r['jarjestys'][1]]}: {r['kulma']:.1f}°, lävistäjät "
+                       f"eroavat {r['lavistajaero'] * 100:.0f} cm. Neljäs kulma: E {r['neljas'][0]:.3f}  "
+                       f"N {r['neljas'][1]:.3f}")
+            if st.button("Täydennä suorakulmioksi", key="sl_suorakulmio_lisaa"):
+                uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "suorakulmio")
+                pohja = next((x[4][0] for x in p if x[4]), valittu or sl_tulos["viivat"][0]["nimi"])
+                karjet = [{"e": p[i][0], "n": p[i][1], "z": p[i][2], "nimi": p[i][3] or kulmat[i],
+                           "laji": "mitattu" if p[i][3] else "laskettu"} for i in r["jarjestys"]]
+                karjet.append({"e": round(r["neljas"][0], 3), "n": round(r["neljas"][1], 3), "z": None,
+                               "nimi": "suorakulmio", "laji": "laskettu"})
+                tila["muokkaukset"].append({"tyyppi": "suorakulmio", "nimi": f"Suorakulmio {uusia + 1}",
+                                            "pohja": pohja, "karjet": karjet})
+                st.rerun()
         except ValueError as e:
             st.warning(str(e))
 
@@ -775,8 +803,8 @@ if ladattu_tiedosto is not None and raportti:
                                  if raportti.get("seinalinja_kaytettavissa") else None)
             if kartan_seinalinja:
                 kk_tila = _seinalinjan_muokkaukset(raaka_bytes)
-                if kk_tila["muokkaukset"] and kk_tila["pohja"] == sl.viivojen_tunniste(kartan_seinalinja):
-                    kartan_seinalinja = sl.sovella_muokkaukset(kartan_seinalinja, kk_tila["muokkaukset"])
+                if kk_tila["muokkaukset"] and kk_tila.get("pohja_tulos"):   # sama lukittu pohja kuin osiossa
+                    kartan_seinalinja = sl.sovella_muokkaukset(kk_tila["pohja_tulos"], kk_tila["muokkaukset"])
             kartta = hk.luo_jobxml_interaktiivinen_kartta(kaikki_pisteet, kartan_seinalinja,
                                                           api_key=hk.MML_API_KEY)
             if kartta is not None:
@@ -838,16 +866,17 @@ if ladattu_tiedosto is not None and raportti:
                     kaikki_pisteet, tapa={"Automaattinen": "lyhin", "Mittausjärjestys": "mittaus"}.get(seinalinja_tapa, "lyhin_vanha"),
                     kantakartta=kaytetty_kantakartta, lidar=sl_lidar_seinat, lidar_paatelty=sl_lidar_paatelty,
                 )
-                # Käsin tehdyt muokkaukset (muokkauskartta) automaattisen viivan päälle; jos automaattinen
-                # viiva muuttuu (järjestys, kantakartta, LiDAR), muokkaukset eivät enää päde
+                # Käsin tehdyt muokkaukset (muokkauskartta) automaattisen viivan päälle. Kun muokkauksia on,
+                # automaattinen viiva on lukittu: uudelleenlaskenta (järjestys, kantakartta, LiDAR) ei muuta sitä
                 sl_tila = _seinalinjan_muokkaukset(raaka_bytes)
                 sl_pohja = sl.viivojen_tunniste(sl_tulos)
-                if sl_tila["pohja"] != sl_pohja:
-                    if sl_tila["muokkaukset"]:
-                        st.info("Automaattinen seinälinja muuttui (järjestys, kantakartta tai LiDAR), joten käsin "
-                                "tehdyt muokkaukset nollattiin.")
-                    sl_tila.update(pohja=sl_pohja, muokkaukset=[])
-                sl_tulos = sl.sovella_muokkaukset(sl_tulos, sl_tila["muokkaukset"])
+                if not sl_tila["muokkaukset"] or not sl_tila.get("pohja_tulos"):
+                    sl_tila.update(pohja=sl_pohja, pohja_tulos=copy.deepcopy(sl_tulos), muokkaukset=[])
+                elif sl_tila["pohja"] != sl_pohja:
+                    st.info("Automaattinen seinälinja olisi muuttunut (järjestys, kantakartta tai LiDAR). Käsin "
+                            "tehdyt muokkaukset pidetään ennallaan; Palauta automaattinen viiva ottaa uuden "
+                            "laskennan käyttöön.")
+                sl_tulos = sl.sovella_muokkaukset(sl_tila["pohja_tulos"], sl_tila["muokkaukset"])
                 if kaytetty_kantakartta:
                     riskit = sl.kantakartan_riskit(kaytetty_kantakartta, kaikki_pisteet)
                     if riskit:
