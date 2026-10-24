@@ -971,29 +971,18 @@ def test_yhdista_saman_viivan_paat_sulkee():
     assert u["suljettu"] and karjet_xy(u) == [(5, 12.5), (2, 5), (0, 0), (10, 0), (8, 5)]
 
 
-def test_kohta_viivassa_a_n_viereen():
-    tulos = _viivat(A=[(0, 0), (10, 0), (10, 8), (0, 8)])
-    tulos["viivat"][0]["suljettu"] = True
-    a = (E0 + 10, N0)
-    # A = kärki 2: piste janalla kärki 2 - kärki 3 -> sen janan väliin (kärjen 2 jälkeen)
-    assert sl.kohta_viivassa(tulos, a, (E0 + 10.2, N0 + 4), ("A", 1)) == ("A", 1)
-    # A = kärki 2: piste janan kärki 1 - kärki 2 puolella -> kärjen 1 jälkeen
-    assert sl.kohta_viivassa(tulos, a, (E0 + 6, N0 - 0.3), ("A", 1)) == ("A", 0)
-    # suljetun viivan ensimmäinen kärki: edellinen jana on viimeinen
-    assert sl.kohta_viivassa(tulos, (E0, N0), (E0 - 0.2, N0 + 4), ("A", 0)) == ("A", 3)
-    # A mitattu piste kärjen kohdalla tunnistetaan kärjeksi ilman viitettä
-    assert sl.kohta_viivassa(tulos, a, (E0 + 10.2, N0 + 4)) == ("A", 1)
 
-
-def test_kohta_viivassa_avoimen_paa_ja_irrallinen_a():
-    tulos = _viivat(A=[(0, 0), (10, 0), (10, 8)], B=[(30, 0), (40, 0)])
-    # avoimen viivan loppu: piste viivan jatkeella -> loppuun
-    assert sl.kohta_viivassa(tulos, (E0 + 10, N0 + 8), (E0 + 4, N0 + 8), ("A", 2)) == ("A", 2)
-    # alku: piste ennen alkua -> alkuun
-    assert sl.kohta_viivassa(tulos, (E0, N0), (E0, N0 + 3), ("A", 0)) == ("A", -1)
-    # A ei ole kärki -> lähin viiva ja jana
-    assert sl.kohta_viivassa(tulos, (E0 + 50, N0 + 50), (E0 + 35, N0 + 0.1)) == ("B", 0)
-
+def test_sovella_muokkaukset_laskettu_piste():
+    tulos = _viivat(A=[(0, 0), (10, 0)])
+    m = {"tyyppi": "piste", "nimi": "L1", "e": E0 + 5, "n": N0 + 2, "a": "x", "b": "y", "a_mitta": 5, "b_mitta": -2}
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    assert uusi["lasketut_pisteet"] == [{"nimi": "L1", "e": E0 + 5, "n": N0 + 2}]
+    assert karjet_xy(uusi["viivat"][0]) == [(0, 0), (10, 0)] and not uusi["varoitukset"]
+    # kärki raahattu laskettuun pisteeseen: laji laskettu
+    siirto = {"tyyppi": "siirra", "viiva": "A", "karki": 1, "e": E0 + 5, "n": N0 + 2, "z": None, "nimi": "L1",
+              "laji": "laskettu"}
+    k = sl.sovella_muokkaukset(tulos, [m, siirto])["viivat"][0]["karjet"][1]
+    assert (k["nimi"], k["laji"]) == ("L1", "laskettu")
 
 def test_suorakulmion_neljas():
     r = sl.suorakulmion_neljas((E0, N0 + 6), (E0 + 10, N0), (E0, N0))

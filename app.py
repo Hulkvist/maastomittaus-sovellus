@@ -559,11 +559,11 @@ def _seinalinjan_muokkaukset(raaka_bytes):
 
 def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     """Muokkauskartta (seinalinjan_muokkain), Kumoa/Palauta ja suorakulmainen mittaus."""
-    kohteet = slm.napsahduspisteet(jx.pisteet_tallennettavaksi(pisteet))
+    kohteet = slm.napsahduspisteet(jx.pisteet_tallennettavaksi(pisteet), sl_tulos)
     st.caption("Raahaa kärkeä hiirellä: se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen, kun se on "
                "lähellä (kärki muuttuu vihreäksi). Klikkaa viivaa = uusi kärki, oikea klikkaus viivaan = poista "
                "jana. Tuplaklikkaa (tai oikea klikkaus) kärkeä = poista kärki. Punainen kärki = laskettu kulma, "
-               "oranssi = käsin siirretty. Uuden viivan saa kartan vasemman yläkulman napista ✏ Uusi viiva. "
+               "oranssi = käsin siirretty, punainen piste = suorakulmaisella mittauksella laskettu piste. Uuden viivan saa kartan vasemman yläkulman napista ✏ Uusi viiva. "
                "Taustakartan voi vaihtaa oikeasta yläkulmasta.")
     tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu)
     if tapahtuma:
@@ -630,13 +630,17 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     with st.container(border=True):
         st.markdown("**Suorakulmainen mittaus**")
         st.caption("A ja B = mitattu piste tai viivan kärki. a-mitta pitkin linjaa A→B pisteestä A, b-mitta "
-                   "kohtisuoraan: + oikealle (A:sta B:hen katsottuna), − vasemmalle. Uusi kärki menee viivaan "
-                   "A:n viereen (A:n viivaan tai, jos A ei ole kärki, lähimpään viivaan).")
-        valinnat = {f"Piste {nimi} ({koodi or '-'})": (e, n, z, str(nimi), None) for nimi, koodi, e, n, z in kohteet}
+                   "kohtisuoraan: + oikealle (A:sta B:hen katsottuna), − vasemmalle. Uusi piste ei muuta viivoja: "
+                   "se näkyy kartalla punaisena pisteenä, johon kärjen voi raahata tai uuden viivan piirtää, ja "
+                   "sitä voi käyttää A:na tai B:nä seuraavassa mittauksessa.")
+        # nimi: (e, n, z, pisteen nimi, (viiva, kärki) tai None, laji)
+        valinnat = {f"Piste {nimi} ({koodi or '-'})": (e, n, z, str(nimi), None,
+                                                       "laskettu" if koodi == sl.LASKETTU_KOODI else "mitattu")
+                    for nimi, koodi, e, n, z in kohteet}
         for v in sl_tulos["viivat"]:
             for j, k in enumerate(v["karjet"]):
-                valinnat[f"{v['nimi']}: kärki {j + 1} ({k.get('nimi')})"] = (k["e"], k["n"], k.get("z"), None,
-                                                                             (v["nimi"], j))
+                valinnat[f"{v['nimi']}: kärki {j + 1} ({k.get('nimi')})"] = (k["e"], k["n"], k.get("z"), k.get("nimi"),
+                                                                             (v["nimi"], j), k.get("laji"))
         nimet = list(valinnat)
         if len(nimet) < 2:
             st.caption("Pisteitä on liian vähän.")
@@ -644,24 +648,21 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
         sarakkeet = st.columns(2)
         a_nimi = sarakkeet[0].selectbox("Piste A", nimet, key="sl_suora_a")
         b_nimi = sarakkeet[1].selectbox("Piste B", nimet, index=1, key="sl_suora_b")
-        toiminto = st.radio("Toiminto", ["Uusi kärki viivaan", "Uusi viiva A→B siirrettynä b-mitalla"],
+        toiminto = st.radio("Toiminto", ["Uusi piste", "Uusi viiva A→B siirrettynä b-mitalla"],
                             horizontal=True, key="sl_suora_toiminto")
         sarakkeet = st.columns(2)
         a_mitta = sarakkeet[0].number_input("a-mitta (m)", value=0.0, step=0.01, format="%.3f", key="sl_suora_amitta",
-                                            disabled=toiminto != "Uusi kärki viivaan")
+                                            disabled=toiminto != "Uusi piste")
         b_mitta = sarakkeet[1].number_input("b-mitta (m)", value=0.0, step=0.01, format="%.3f", key="sl_suora_bmitta")
         A, B = valinnat[a_nimi], valinnat[b_nimi]
         try:
-            if toiminto == "Uusi kärki viivaan":
+            if toiminto == "Uusi piste":
                 e, n = sl.suorakulmainen_piste(A[:2], B[:2], a_mitta, b_mitta)
-                kohde, jalkeen = sl.kohta_viivassa(sl_tulos, A[:2], (e, n), A[4])
-                karjet = next(v for v in sl_tulos["viivat"] if v["nimi"] == kohde)["karjet"]
-                kohta = "alkuun" if jalkeen < 0 else f"kärjen {jalkeen + 1} ({karjet[jalkeen].get('nimi')}) jälkeen"
-                st.caption(f"Laskettu piste: E {e:.3f}  N {n:.3f} → {kohde}, {kohta}")
-                if st.button("Lisää kärki", key="sl_suora_lisaa"):
-                    tila["muokkaukset"].append({"tyyppi": "lisaa", "viiva": kohde, "jalkeen": jalkeen,
-                                                "e": round(e, 3), "n": round(n, 3), "z": None,
-                                                "nimi": f"a{a_mitta:g} b{b_mitta:g}", "laji": "laskettu"})
+                st.caption(f"Laskettu piste: E {e:.3f}  N {n:.3f}")
+                if st.button("Lisää piste", key="sl_suora_lisaa"):
+                    nimi = f"L{len(sl_tulos.get('lasketut_pisteet', [])) + 1}"
+                    tila["muokkaukset"].append({"tyyppi": "piste", "nimi": nimi, "e": round(e, 3), "n": round(n, 3),
+                                                "a": a_nimi, "b": b_nimi, "a_mitta": a_mitta, "b_mitta": b_mitta})
                     st.rerun()
             else:
                 alku = sl.suorakulmainen_piste(A[:2], B[:2], 0.0, b_mitta)
@@ -698,7 +699,7 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
                 uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "suorakulmio")
                 pohja = next((x[4][0] for x in p if x[4]), valittu or sl_tulos["viivat"][0]["nimi"])
                 karjet = [{"e": p[i][0], "n": p[i][1], "z": p[i][2], "nimi": p[i][3] or kulmat[i],
-                           "laji": "mitattu" if p[i][3] else "laskettu"} for i in r["jarjestys"]]
+                           "laji": p[i][5] or "laskettu"} for i in r["jarjestys"]]
                 karjet.append({"e": round(r["neljas"][0], 3), "n": round(r["neljas"][1], 3), "z": None,
                                "nimi": "suorakulmio", "laji": "laskettu"})
                 tila["muokkaukset"].append({"tyyppi": "suorakulmio", "nimi": f"Suorakulmio {uusia + 1}",
