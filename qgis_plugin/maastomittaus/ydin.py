@@ -354,16 +354,22 @@ def lue_las_paikallinen(polku, osa=5_000_000, luokat=False):
 
 
 def taysi_vauhti():
-    """Laskentasäie täydelle nopeudelle. QGIS ajaa Processing-työkalut taustasäikeessä: macOS siirtää sen
-    tehokkuusytimille (mitattu Apple M: sama pistepilven ruutu 67 s -> 310 s) ja Windows 11 voi hidastaa
-    taustasäiettä (EcoQoS). Palauttaa, onnistuiko; virheet ohitetaan (työkalu toimii silti)."""
+    """Laskentasäie vähintään käyttäjän käynnistämän työn prioriteetille. QGIS ajaa Processing-työkalut
+    taustasäikeessä: macOS voi siirtää sen tehokkuusytimille (mitattu Apple M: sama pistepilven ruutu 67 s ->
+    310 s) ja Windows 11 hidastaa taustasäiettä (EcoQoS). Prioriteettia ei lasketa. Palauttaa, onnistuiko;
+    virheet ohitetaan (työkalu toimii silti)."""
     import ctypes
     import sys
 
     try:
         if sys.platform == "darwin":
             libc = ctypes.CDLL("/usr/lib/libSystem.dylib")
-            return libc.pthread_set_qos_class_self_np(0x19, 0) == 0          # QOS_CLASS_USER_INITIATED
+            libc.pthread_self.restype = ctypes.c_void_p
+            nyt, _ = ctypes.c_uint(), ctypes.c_int()
+            libc.pthread_get_qos_class_np(ctypes.c_void_p(libc.pthread_self()), ctypes.byref(nyt), ctypes.byref(_))
+            if nyt.value >= 0x19:                                             # QOS_CLASS_USER_INITIATED
+                return True
+            return libc.pthread_set_qos_class_self_np(0x19, 0) == 0
         if sys.platform == "win32":
             from ctypes import wintypes
 
@@ -373,12 +379,65 @@ def taysi_vauhti():
 
             k32 = ctypes.windll.kernel32
             saie = k32.GetCurrentThread()
-            k32.SetThreadPriority(saie, 0)                                   # THREAD_PRIORITY_NORMAL
+            if k32.GetThreadPriority(saie) < 0:
+                k32.SetThreadPriority(saie, 0)                               # THREAD_PRIORITY_NORMAL
             tila = Tila(1, 1, 0)        # EXECUTION_SPEED-hidastus pois päältä
             return bool(k32.SetThreadInformation(saie, 3, ctypes.byref(tila), ctypes.sizeof(tila)))
     except Exception:
         pass
     return False
+
+
+class valveilla:
+    """Pitkä laskenta (with valveilla(): ...): käyttöjärjestelmä ei hidasta eikä nukahda kesken. macOS hidastaa
+    sovellusta, joka ei ole näkyvissä (App Nap): qgis_processilla 78 milj. pisteen ruuduittainen ajo hidastui
+    muutaman minuutin jälkeen nelinkertaiseksi, ja sama käy QGIS:lle, kun käyttäjä vaihtaa toiseen ohjelmaan.
+    NSProcessInfo.beginActivity (macOS) ja SetThreadExecutionState (Windows) estävät sen ajon ajaksi; myös
+    säikeen prioriteetti nostetaan (taysi_vauhti). Virheet ohitetaan."""
+
+    def __enter__(self):
+        import ctypes
+        import sys
+
+        self._loppu = None
+        taysi_vauhti()
+        try:
+            if sys.platform == "darwin":
+                objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+                ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Foundation.framework/Foundation")
+                objc.objc_getClass.restype = ctypes.c_void_p
+                objc.sel_registerName.restype = ctypes.c_void_p
+                vp = ctypes.c_void_p
+
+                def viesti(restype, *argtypes):
+                    return ctypes.cast(objc.objc_msgSend, ctypes.CFUNCTYPE(restype, vp, vp, *argtypes))
+
+                sel = objc.sel_registerName
+                info = viesti(vp)(objc.objc_getClass(b"NSProcessInfo"), sel(b"processInfo"))
+                syy = viesti(vp, ctypes.c_char_p)(objc.objc_getClass(b"NSString"), sel(b"stringWithUTF8String:"),
+                                                  b"Seinalinjat pistepilvesta")
+                # NSActivityUserInitiated (sisältää NSActivityIdleSystemSleepDisabled)
+                tunnus = viesti(vp, ctypes.c_uint64, vp)(info, sel(b"beginActivityWithOptions:reason:"),
+                                                          0x00FFFFFF | (1 << 20), syy)
+                if tunnus:
+                    viesti(vp)(tunnus, sel(b"retain"))
+                    self._loppu = lambda: (viesti(None, vp)(info, sel(b"endActivity:"), tunnus),
+                                           viesti(None)(tunnus, sel(b"release")))
+            elif sys.platform == "win32":
+                k32 = ctypes.windll.kernel32
+                k32.SetThreadExecutionState(0x80000001)          # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+                self._loppu = lambda: k32.SetThreadExecutionState(0x80000000)
+        except Exception:
+            self._loppu = None
+        return self
+
+    def __exit__(self, *_):
+        if self._loppu is not None:
+            try:
+                self._loppu()
+            except Exception:
+                pass
+        return False
 
 
 def ruudut(x0, y0, x1, y1, koko):

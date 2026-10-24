@@ -144,9 +144,13 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
             createByDefault=False))
 
     def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
+        # Pitkä ajo: ei App Napia (macOS) eikä nukahtamista, säie täydelle nopeudelle (ydin.valveilla)
+        with ydin.valveilla():
+            return self._aja(parameters, context, feedback)
+
+    def _aja(self, parameters, context, feedback):
         import numpy as np
 
-        ydin.taysi_vauhti()        # QGIS:n taustasäie olisi hidas (macOS: tehokkuusytimet)
         polku = self.parameterAsFile(parameters, self.PILVI, context)
         try:
             koord = ydin.las_koordinaatisto(polku)

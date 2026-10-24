@@ -543,5 +543,10 @@ def test_ruudut_ja_kattorasteri():
     assert katto.rasteri.sum() == 1 and katto.rasteri[2, 7]
 
 
-def test_taysi_vauhti_ei_kaada():
+def test_taysi_vauhti_ja_valveilla_eivat_kaada():
     assert ydin.taysi_vauhti() in (True, False)
+    with ydin.valveilla() as v:
+        assert v is not None
+    with pytest.raises(ValueError):          # poikkeus kulkee läpi, ja aktiviteetti päättyy
+        with ydin.valveilla():
+            raise ValueError("x")
