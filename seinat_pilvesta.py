@@ -41,6 +41,13 @@ class WallOptions:
     min_density: float = 20.0    # seinäsolujen painopisteitä / m (enintään 1 / wall_cell)
     iterations: int = 400
     max_lines: int = 200
+    # Konsensus: RANSAC ajetaan consensus_runs kertaa eri siemenillä, ja seinäsolu hyväksytään, jos se kuuluu
+    # samansuuntaiseen linjaan vähintään consensus_need ajossa. Ahne haku vahvistaa pieniä syötemuutoksia
+    # (Katajaharju: siemen tai maanpinnan otos vaihtoi 12–18 % linjapituudesta); kasvillisuuden solut
+    # osuvat ajosta toiseen eri suuntiin ja putoavat pois. 1 = ei konsensusta.
+    consensus_runs: int = 7
+    consensus_need: int = 4
+    consensus_deg: float = 5.0
     snap_deg: float = 5.0        # pää- tai kohtisuoran suunnan toleranssi: SEINA-luokka (muuten EPAVARMA) [°]
     # Käännetäänkö SEINA-luokan seinät tarkasti pääsuuntaan. Pois oletuksena: kääntö siirtää seinän päitä
     # (2° vino 5 m seinä: 9 cm), ja oikeissa keilauksissa seinät poikkesivat pilvestä päästä päähän 5–17 cm.
@@ -72,6 +79,10 @@ class WallOptions:
     plinth_max: float = 1.6      # sokkeli (esim. kivijalka) päättyy viimeistään tähän [m]
     facade_tol: float = 0.015    # saman pinnan kerrosten suurin ero [m]
     # Kartoitusyleistys: enintään general_depth syvät ja general_width leveät ulokkeet/sisennykset pois
+    # Sisälinjojen poisto (_drop_inside): tiheä maanpinta merkitsee ulkoaluetta (sisäpiha), mutta vain jos se
+    # on enintään floor_raise ympäristön (8 m) alimman maan yläpuolella. Ikkunoista näkyvä sisälattia on
+    # talon sisällä alin pinta ja näytti maalta, jolloin sisäseinien linjat jäivät (Katajaharju, sim/lasi).
+    floor_raise: float = 0.3
     sure_length: float = 2.0     # tätä pidempi julkisivullinen seinä on SEINA, vaikka se on vino pääsuuntaan
     general_depth: float = 0.5
     general_width: float = 2.0
@@ -141,6 +152,13 @@ class Segment:
         return float(np.linalg.norm(self.p1 - self.p0))
 
 
+def ground_sample(xyz: np.ndarray, n: int = 5_000_000) -> np.ndarray:
+    """Maanpinnan otos isosta pilvestä: joka k:s piste (tallennusjärjestys on ajallinen, joten otos kattaa
+    alueen tasaisesti). Ei satunnainen: satunnainen otos muutti maanpintaa seinien kohdalla 10 %:ssa
+    pisteistä yli 2,7 cm, mikä vaihtoi Katajaharjussa 22 % seinäsoluista ja 11 % linjapituudesta."""
+    return xyz if len(xyz) <= n else xyz[::-(-len(xyz) // n)]
+
+
 class Ground:
     """Paikallinen maanpinta ruudukkona: ruudun alin 2 %-piste, ja jokainen ruutu saa naapuriruutujensa
     (3 x 3) matalimman arvon (seinäruuduissa ei ole maata). Tyhjät ruudut täytetään naapureista, joten
@@ -176,11 +194,21 @@ class Ground:
         return np.min([p[1 + di:p.shape[0] - 1 + di, 1 + dj:p.shape[1] - 1 + dj]
                        for di in (-1, 0, 1) for dj in (-1, 0, 1)], axis=0)
 
-    def at(self, xy: np.ndarray) -> np.ndarray:
+    def _idx(self, xy: np.ndarray):
         ij = np.floor(xy / self.cell).astype(np.int64) - self.off
-        i = np.clip(ij[:, 0], 0, self.shape[0] - 1)
-        j = np.clip(ij[:, 1], 0, self.shape[1] - 1)
-        return self.grid[i, j]
+        return np.clip(ij[:, 0], 0, self.shape[0] - 1), np.clip(ij[:, 1], 0, self.shape[1] - 1)
+
+    def at(self, xy: np.ndarray) -> np.ndarray:
+        return self.grid[self._idx(xy)]
+
+    def raised(self, xy: np.ndarray, radius: float = 8.0) -> np.ndarray:
+        """Paikallinen maanpinta ympäristön (radius) alimman maanpinnan yläpuolella [m]: ikkunoista näkyvä
+        sisälattia on koholla (ruudun alin pinta talon sisällä), katu ja sisäpiha eivät."""
+        low = self.grid
+        for _ in range(int(radius / self.cell)):
+            low = self._min3(low)
+        i = self._idx(xy)
+        return self.grid[i] - low[i]
 
 
 def local_ground(xyz: np.ndarray, cell: float) -> np.ndarray:
@@ -377,6 +405,24 @@ def ransac_local(pts: np.ndarray, opt: WallOptions, window: float = 1.0, tries: 
         if not accepted:
             alive[inl] = False
     return segments
+
+
+def stable_cells(pts: np.ndarray, opt: WallOptions) -> np.ndarray:
+    """Seinäsolut, jotka ransac_local liittää samansuuntaiseen (consensus_deg) linjaan vähintään
+    consensus_need ajossa consensus_runs:sta (siemenet opt.seed, opt.seed + 1, ...)."""
+    if opt.consensus_runs <= 1 or len(pts) < 5:
+        return np.ones(len(pts), bool)
+    key = np.ascontiguousarray(pts).view(np.dtype((np.void, pts.dtype.itemsize * 2))).ravel()
+    order = np.argsort(key)
+    angle = np.full((len(pts), opt.consensus_runs), np.nan)
+    for k in range(opt.consensus_runs):
+        for seg in ransac_local(pts, replace(opt, seed=opt.seed + k)):
+            q = np.ascontiguousarray(seg.points).view(key.dtype).ravel()
+            idx = order[np.searchsorted(key[order], q)]
+            angle[idx, k] = np.degrees(np.arctan2(seg.direction[1], seg.direction[0])) % 180
+    d = np.abs(angle[:, :, None] - angle[:, None, :])
+    agree = (np.minimum(d, 180 - d) <= opt.consensus_deg).sum(axis=2)    # nan-vertailut epätosia
+    return agree.max(axis=1) >= opt.consensus_need
 
 
 def _facade_layers(t: np.ndarray, h: np.ndarray, opt: WallOptions, min_pts: int = 15):
@@ -1060,8 +1106,7 @@ def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segme
     (wall_info), kun opt.refine."""
     opt = opt or WallOptions()
     # Maanpinta otoksesta (iso pilvi), seinäkorkeuden pisteet paloittain koko pilvestä
-    sample = xyz if len(xyz) <= 5_000_000 else xyz[np.random.default_rng(opt.seed).choice(len(xyz), 5_000_000,
-                                                                                           replace=False)]
+    sample = ground_sample(xyz)
     if opt.indoor:
         floor = floor_level(sample)
         height = lambda p: p[:, 2] - floor                                     # noqa: E731
@@ -1073,7 +1118,9 @@ def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segme
     det = voxel_thin(band, opt.voxel) if opt.voxel > 0 else band
     cells = wall_cells(det, height(det), opt)
     del det
-    segs = ransac_local(cells, replace(opt, min_density=min(opt.min_density, 0.6 / opt.wall_cell)))
+    ropt = replace(opt, min_density=min(opt.min_density, 0.6 / opt.wall_cell))
+    cells = cells[stable_cells(cells, ropt)]
+    segs = ransac_local(cells, ropt)
     if opt.refine and segs:
         # Tarkennus alkuperäisillä pisteillä seinien läheltä (tunnistuksen harvennus ei vaikuta paikkaan)
         pts = band[_near_cells(band[:, :2], cells, opt.search + 0.1)]
@@ -1092,7 +1139,8 @@ def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segme
     segs = _generalize(segs, opt)
     segs = outline(segs, opt) if opt.outline else segs
     if not opt.indoor:
-        segs = _drop_inside(segs, sample[height(sample) < 0.15, :2])
+        gxy = sample[height(sample) < 0.15, :2]
+        segs = _drop_inside(segs, gxy[ground.raised(gxy) < opt.floor_raise])
     if opt.refine and segs:
         wall_info(segs, pts, rel, index, opt)
         segs = _drop_upper_duplicates(segs)
@@ -1111,8 +1159,7 @@ def facade_check(xyz: np.ndarray, segments: list[Segment], opt: WallOptions | No
     opt = opt or WallOptions()
     if not segments:
         return []
-    sample = xyz if len(xyz) <= 5_000_000 else xyz[np.random.default_rng(opt.seed).choice(len(xyz), 5_000_000,
-                                                                                           replace=False)]
+    sample = ground_sample(xyz)
     if opt.indoor:
         floor = floor_level(sample)
         height = lambda p: p[:, 2] - floor                                     # noqa: E731
@@ -1156,7 +1203,8 @@ def facade_check(xyz: np.ndarray, segments: list[Segment], opt: WallOptions | No
 def _drop_upper_duplicates(segs: list[Segment], side: float = 0.35, angle_deg: float = 10.0) -> list[Segment]:
     """Rinnakkaiset kaksoislinjat (enintään side sivussa, lyhyempi vähintään puoliksi toisen kohdalla) samasta
     seinästä: ikkunanauha tai seinän yläosa julkisivun takana. Jäljelle jää linja, jonka julkisivu alkaa
-    alempaa (wall_info: korkeus), sitten linja lähempänä julkisivua (pinta), sitten pidempi. Nurkkien liitospalat (ilman tietoja) säilyvät."""
+    alempaa (wall_info: korkeus), sitten linja lähempänä julkisivua (pinta), sitten pidempi. Alle 5 cm
+    toisistaan olevat ovat samaa pintaa: pidempi jää. Nurkkien liitospalat (ilman tietoja) säilyvät."""
     cos_lim = np.cos(np.radians(angle_deg))
     drop = set()
     order = sorted(range(len(segs)), key=lambda k: -segs[k].length)
@@ -1170,14 +1218,19 @@ def _drop_upper_duplicates(segs: list[Segment], side: float = 0.35, angle_deg: f
                 continue
             short, long_ = (a, b) if a.length <= b.length else (b, a)
             d, n = long_.direction, long_.normal
-            if abs(((short.p0 + short.p1) / 2 - long_.p0) @ n) > side:
+            offset = abs(((short.p0 + short.p1) / 2 - long_.p0) @ n)
+            if offset > side:
                 continue
             ss, sl = sorted([short.p0 @ d, short.p1 @ d]), sorted([long_.p0 @ d, long_.p1 @ d])
             if min(ss[1], sl[1]) - max(ss[0], sl[0]) < 0.5 * short.length:
                 continue
             ha, hb = a.info["korkeus"][0], b.info["korkeus"][0]
             pa, pb = abs(a.info.get("pinta") or 0.0), abs(b.info.get("pinta") or 0.0)
-            if hb > ha + 0.3 or ha > hb + 0.3:
+            if offset < 0.05:
+                # Sama pinta (esim. oven kohta, jossa julkisivu alkaa kivijalkaa alempaa): pidempi jää.
+                # Muuten 3,6 m pala pudotti Kruna2:n 59 m julkisivun.
+                loser = j if b is short else i
+            elif hb > ha + 0.3 or ha > hb + 0.3:
                 loser = j if hb > ha else i
             elif abs(pa - pb) > 0.03:          # linja kauempana julkisivusta (esim. lasin tasossa)
                 loser = j if pb > pa else i
@@ -1202,8 +1255,9 @@ def _band(xyz: np.ndarray, height, lo: float, hi: float, chunk: int = 5_000_000)
 def _drop_inside(segs: list[Segment], ground_xy: np.ndarray, res: float = 0.25, seal: int = 2) -> list[Segment]:
     """Rakennuksen sisällä olevat linjat pois (ikkunoista ja ovista näkyvät sisäseinät). Ruudukko täytetään
     ulkoreunalta seiniin asti (seinät levennetty seal ruutua, jolloin pienet aukot sulkeutuvat); myös
-    alueet, joilla on tiheästi keilattua maanpintaa (ground_xy: esim. sisäpiha), ovat ulkona. Linja on
-    sisällä, jos kumpikaan sen puoli ei ole ulkona."""
+    alueet, joilla on keilattua maan tason pintaa (ground_xy: esim. sisäpiha), ovat ulkona; niistä täytetään
+    seinillä, joiden alle 3 m aukot on suljettu, jottei täyttö valu ovista sisätiloihin.
+    Linja on sisällä, jos kumpikaan sen puoli ei ole ulkona."""
     if len(segs) < 3:
         return segs
     ends = np.array([p for s in segs for p in (s.p0, s.p1)])
@@ -1230,27 +1284,50 @@ def _drop_inside(segs: list[Segment], ground_xy: np.ndarray, res: float = 0.25, 
         w[:, :-1] |= wall[:, 1:]
         wall = w
     free = ~wall
-    out = np.zeros(shape, bool)
-    out[[0, -1], :] = True
-    out[:, [0, -1]] = True
-    # Maanpinnan tiheys: ruudut, joissa on vähintään puolet ulkoalueen tyypillisestä määrästä
+
+    def flood_in(out, space):
+        out = out & space
+        while True:
+            grown = out.copy()
+            grown[1:] |= out[:-1]
+            grown[:-1] |= out[1:]
+            grown[:, 1:] |= out[:, :-1]
+            grown[:, :-1] |= out[:, 1:]
+            grown &= space
+            if (grown == out).all():
+                return out
+            out = grown
+
+    flood = lambda out: flood_in(out, free)                                    # noqa: E731
+
+    edge = np.zeros(shape, bool)
+    edge[[0, -1], :] = True
+    edge[:, [0, -1]] = True
+    from_edge = flood(edge)
+    dense = np.zeros(shape, bool)
     if len(ground_xy):
         gij = cells(ground_xy)
         count = np.zeros(shape)
         np.add.at(count, (gij[:, 0], gij[:, 1]), 1)
-        typical = np.median(count[count > 0]) if (count > 0).any() else 0
-        out |= count >= max(5, 0.5 * typical)
-    out &= free
-    while True:
-        grown = out.copy()
-        grown[1:] |= out[:-1]
-        grown[:-1] |= out[1:]
-        grown[:, 1:] |= out[:, :-1]
-        grown[:, :-1] |= out[:, 1:]
-        grown &= free
-        if (grown == out).all():
-            break
-        out = grown
+        # Muutama piste riittää: ground_xy on jo rajattu maan tasoon (Ground.raised), joten sisälattia ei
+        # kelpaa, ja harvemmin keilattu pieni sisäpiha jäi tiheysrajalla (puolet tyypillisestä) sisätilaksi.
+        dense = count >= 2
+    # Täyttö maanpinnasta (sisäpiha) seinillä, joita on levennetty lisää: täyttö kadulta tai sisäpihalta ei
+    # valu alle 3 m aukoista (ovet, porttikäytävät) rakennuksen sisään. Lopuksi alue levennetään takaisin
+    # seinien viereen.
+    def grow(a, n):
+        for _ in range(n):
+            g = a.copy()
+            g[1:] |= a[:-1]
+            g[:-1] |= a[1:]
+            g[:, 1:] |= a[:, :-1]
+            g[:, :-1] |= a[:, 1:]
+            a = g
+        return a
+
+    widen = int(1.5 / res)
+    tight = ~grow(wall, widen)
+    near_ground = grow(flood_in(dense, tight), widen + seal + 1)
     keep = []
     for s in segs:
         if s.length < 1.0:          # nurkkien ja porrastusten liitospalat
@@ -1263,7 +1340,7 @@ def _drop_inside(segs: list[Segment], ground_xy: np.ndarray, res: float = 0.25, 
             for sign in (1, -1):
                 ij = cells(p + sign * np.outer(np.arange(seal + 1, int(2.0 / res)) * res, s.normal))
                 f = ij[free[ij[:, 0], ij[:, 1]]]
-                if len(f) == 0 or out[f[0, 0], f[0, 1]]:
+                if len(f) == 0 or near_ground[f[0, 0], f[0, 1]] or from_edge[f[0, 0], f[0, 1]]:
                     outside = True
                     break
             if outside:

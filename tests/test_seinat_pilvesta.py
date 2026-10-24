@@ -128,3 +128,19 @@ def test_low_wall_under_window_band_found_with_iphone_profile():
                                                                     density=1000)]
     segs = [s for s in _south(extract_walls(_house(rng, south), WallOptions())) if s.length > 5]
     assert len(segs) == 1 and abs(segs[0].p0[1]) < 0.01 and abs(segs[0].p1[1]) < 0.01, [(s.p0, s.p1) for s in segs]
+
+
+def test_short_piece_on_same_surface_does_not_drop_long_facade():
+    """Kruna2: 3,6 m pala (julkisivu alkaa 0,6 m, oven kohta) 1,7 cm sivussa 59 m julkisivusta (alkaa 1,4 m,
+    kivijalka) ei saa pudottaa pitkää: sama pinta."""
+    from seinat_pilvesta import Segment, _drop_upper_duplicates
+
+    d = np.array([1.0, 0.0])
+    long_ = Segment(np.array([0.0, 0.0]), np.array([59.0, 0.0]), d, 0.0, np.zeros((0, 2)),
+                    info={"korkeus": (1.4, 3.5), "pinta": 0.0})
+    short = Segment(np.array([35.0, 0.017]), np.array([38.6, 0.017]), d, 0.017, np.zeros((0, 2)),
+                    info={"korkeus": (0.6, 3.5), "pinta": 0.0})
+    upper = Segment(np.array([10.0, -0.25]), np.array([20.0, -0.25]), d, -0.25, np.zeros((0, 2)),
+                    info={"korkeus": (1.9, 3.5), "pinta": 0.0})
+    kept = {id(s) for s in _drop_upper_duplicates([long_, short, upper])}
+    assert kept == {id(long_)}
