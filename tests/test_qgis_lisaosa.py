@@ -309,8 +309,9 @@ def test_kirjoita_dxf_r12(tmp_path):
     assert len(sl.lue_lidar_dxf(polku)["SEINA"]) == 0   # eri taso, ei LiDAR-seiniä
 
 
-def _kirjoita_las(polku, xyz, skaala=0.001, vlrt=()):
-    """Pieni pakkaamaton LAS 1.2 (pistetyyppi 0) testejä varten; vlrt = [(user_id, record_id, data)]."""
+def _kirjoita_las(polku, xyz, skaala=0.001, vlrt=(), luokat=None):
+    """Pieni pakkaamaton LAS 1.2 (pistetyyppi 0) testejä varten; vlrt = [(user_id, record_id, data)],
+    luokat = pisteiden luokat (tavu 15, ylimmät bitit synthetic/key point/withheld)."""
     import struct
 
     import numpy as np
@@ -333,6 +334,8 @@ def _kirjoita_las(polku, xyz, skaala=0.001, vlrt=()):
     otsikko[179:227] = struct.pack("<6d", yla[0], ala[0], yla[1], ala[1], yla[2], ala[2])
     pisteet = np.zeros((len(xyz), 20), dtype=np.uint8)
     pisteet[:, :12] = np.round((xyz - siirto) / skaala).astype("<i4").view(np.uint8).reshape(-1, 12)
+    if luokat is not None:
+        pisteet[:, 15] = np.asarray(luokat, dtype=np.uint8)
     with open(polku, "wb") as f:
         f.write(bytes(otsikko) + vlr_tavut + pisteet.tobytes())
 
@@ -377,6 +380,10 @@ def test_lue_las_xyz_ja_las_alue(tmp_path):
     paikallinen, origo = ydin.lue_las_paikallinen(polku, osa=2)
     assert paikallinen.dtype == np.float32 and tuple(origo) == (E0 - 3.0, N0, 0.0)
     assert np.allclose(paikallinen + origo, xyz, atol=1e-5)
+    # Luokat (pistemuoto 0: tavun 15 viisi alinta bittiä; ylimmät bitit ovat liputuksia)
+    _kirjoita_las(polku, xyz, luokat=[6, 2 | 0x20, 1])
+    _, _, luokka = ydin.lue_las_paikallinen(polku, osa=2, luokat=True)
+    assert luokka.tolist() == [6, 2, 1]
     (tmp_path / "x.las").write_bytes(b"ei las")
     assert ydin.las_alue(str(tmp_path / "x.las")) is None
 
@@ -524,3 +531,22 @@ def test_korjaa_paluunumerot_ja_pistemaara(tmp_path):
     assert [tavut[227 + 20 * i + 14] for i in range(3)] == [0b001001, 0b010001, 0b11001001]
     assert ydin.korjaa_paluunumerot(polku) == 0
     assert np.allclose(ydin.lue_las_xyz(polku)[:, 2], [10, 11, 12])
+
+
+def test_ruudut_ja_kattorasteri():
+    np = pytest.importorskip("numpy")
+    r = ydin.ruudut(E0 + 10, N0 - 5, E0 + 260, N0 + 140, 150)
+    assert len(r) == 3 * 2 and (r[0][2], r[0][3]) == (150 * (E0 // 150), 150 * ((N0 - 5) // 150))
+    assert all(e % 150 == 0 and n % 150 == 0 for _, _, e, n in r)
+    katto = ydin.Kattorasteri((E0, N0, E0 + 10, N0 + 10), 0.5)
+    katto.lisaa([(E0 + 1.2, N0 + 3.7), (E0 + 99, N0)])       # alueen ulkopuolinen jää pois
+    assert katto.rasteri.sum() == 1 and katto.rasteri[2, 7]
+
+
+def test_taysi_vauhti_ja_valveilla_eivat_kaada():
+    assert ydin.taysi_vauhti() in (True, False)
+    with ydin.valveilla() as v:
+        assert v is not None
+    with pytest.raises(ValueError):          # poikkeus kulkee läpi, ja aktiviteetti päättyy
+        with ydin.valveilla():
+            raise ValueError("x")

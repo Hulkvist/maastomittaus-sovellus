@@ -21,6 +21,7 @@ ALGORITMI = "maastomittaus:seinalinja_jxl"
 VERTAILU = ("Vertaa seinälinjaa LiDARiin", "maastomittaus:vertaa_seinalinjaa_lidariin")
 KORJAUS = ("Korjaa pistepilven koordinaatisto", "maastomittaus:korjaa_pistepilven_koordinaatisto")
 PILVESTA = ("Seinälinjat pistepilvestä", "maastomittaus:seinalinjat_pistepilvesta")
+RUUDUITTAIN = ("Seinälinjat isosta pistepilvestä (ruuduittain)", "maastomittaus:seinalinjat_ruuduittain")
 RAJAA = "Seinälinjat pistepilvestä: rajaa alue kartalta"
 VIIMEISIN_PILVI = "maastomittaus/viimeisin_pilvi"   # QgsSettings: edellisen ajon pistepilvi
 
@@ -57,6 +58,7 @@ class MaastomittausPlugin:
         self.vertailu = None
         self.korjaus = None
         self.pilvesta = None
+        self.ruuduittain = None
         self.rajaa = None
         self.rajaustyokalu = None
         self.edellinen_tyokalu = None
@@ -87,6 +89,11 @@ class MaastomittausPlugin:
         self.pilvesta = QAction(PILVESTA[0], self.iface.mainWindow())
         self.pilvesta.triggered.connect(lambda: self.avaa_valinnalla(PILVESTA[1], "ALUE", self._pilvi()))
         self.iface.addPluginToMenu(VALIKKO, self.pilvesta)
+        self.ruuduittain = QAction(RUUDUITTAIN[0], self.iface.mainWindow())
+        self.ruuduittain.setToolTip("Kaupungin ajoneuvo- ja ilmakeilaus: koko pilvi ruutu kerrallaan, katot "
+                                    "pudottavat aidat")
+        self.ruuduittain.triggered.connect(lambda: self.avaa(RUUDUITTAIN[1], self._pilvi()))
+        self.iface.addPluginToMenu(VALIKKO, self.ruuduittain)
         self.rajaa = QAction(RAJAA, self.iface.mainWindow())
         self.rajaa.setToolTip("Vedä suorakaide kartalle: Seinälinjat pistepilvestä aukeaa rajaus valmiina")
         self.rajaa.triggered.connect(self.aloita_rajaus)
@@ -144,10 +151,10 @@ class MaastomittausPlugin:
         self.avaa(PILVESTA[1], {**self._pilvi(), "LAAJUUS": laajuus})
 
     def unload(self):
-        for toiminto in (self.toiminto, self.vertailu, self.pilvesta, self.rajaa, self.korjaus):
+        for toiminto in (self.toiminto, self.vertailu, self.pilvesta, self.ruuduittain, self.rajaa, self.korjaus):
             if toiminto is not None:
                 self.iface.removePluginMenu(VALIKKO, toiminto)
-        self.toiminto = self.vertailu = self.pilvesta = self.rajaa = self.korjaus = None
+        self.toiminto = self.vertailu = self.pilvesta = self.ruuduittain = self.rajaa = self.korjaus = None
         if self.rajaustyokalu is not None:
             self.iface.mapCanvas().unsetMapTool(self.rajaustyokalu)
             self.rajaustyokalu = None

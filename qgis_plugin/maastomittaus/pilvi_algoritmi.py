@@ -167,6 +167,11 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
         return xyz, origo
 
     def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
+        # Pitkä ajo: ei App Napia (macOS) eikä nukahtamista, säie täydelle nopeudelle (ydin.valveilla)
+        with ydin.valveilla():
+            return self._aja(parameters, context, feedback)
+
+    def _aja(self, parameters, context, feedback):
         polku = self.parameterAsFile(parameters, self.PILVI, context)
         from qgis.core import QgsSettings
         QgsSettings().setValue("maastomittaus/viimeisin_pilvi", polku)   # valikko täyttää seuraavalla kerralla

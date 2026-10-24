@@ -315,10 +315,11 @@ def lue_las_xyz(polku):
     return xyz_int * np.array(skaala) + np.array(siirto)
 
 
-def lue_las_paikallinen(polku, osa=5_000_000):
+def lue_las_paikallinen(polku, osa=5_000_000, luokat=False):
     """Pakkaamattoman LAS-tiedoston pisteet paikallisina float32-koordinaatteina (n x 3) ja siirto
     (e0, n0, 0): kartan koordinaatti = paikallinen + siirto. Puolet vähemmän muistia kuin lue_las_xyz,
-    ja luku paloittain, joten iso pilvi (Stonex, kymmeniä miljoonia pisteitä) mahtuu muistiin."""
+    ja luku paloittain, joten iso pilvi (Stonex, kymmeniä miljoonia pisteitä) mahtuu muistiin.
+    luokat=True: lisäksi pisteiden luokat (uint8; ilmakeilauksen katot erottavat seinät aidoista)."""
     import numpy as np
 
     with open(polku, "rb") as f:
@@ -336,13 +337,136 @@ def lue_las_paikallinen(polku, osa=5_000_000):
     siirto = np.array(struct.unpack("<3d", otsikko[155:179]))
     _, min_x, _, min_y = struct.unpack("<4d", otsikko[179:211])
     origo = np.array([math.floor(min_x), math.floor(min_y), 0.0])
-    tietue = np.dtype([("xyz", "<i4", (3,)), ("muut", f"V{pituus - 12}")])
+    # Luokka: pistemuodoissa 0–5 tavussa 15 (5 alinta bittiä), muodoissa 6–10 tavussa 16
+    muoto = otsikko[104] & 0x3F
+    luokan_kohta, maski = (16, 0xFF) if muoto >= 6 else (15, 0x1F)
+    tietue = np.dtype({"names": ["xyz", "luokka"], "formats": [("<i4", (3,)), "u1"],
+                       "offsets": [0, luokan_kohta], "itemsize": pituus})
     data = np.memmap(polku, dtype=tietue, mode="r", offset=alku, shape=(maara,))
     xyz = np.empty((maara, 3), dtype=np.float32)
+    luokka = np.empty(maara, dtype=np.uint8) if luokat else None
     for i in range(0, maara, osa):
         xyz[i:i + osa] = data["xyz"][i:i + osa] * skaala + (siirto - origo)
+        if luokat:
+            luokka[i:i + osa] = data["luokka"][i:i + osa] & maski
     del data
-    return xyz, origo
+    return (xyz, origo, luokka) if luokat else (xyz, origo)
+
+
+def taysi_vauhti():
+    """Laskentasäie vähintään käyttäjän käynnistämän työn prioriteetille. QGIS ajaa Processing-työkalut
+    taustasäikeessä: macOS voi siirtää sen tehokkuusytimille (mitattu Apple M: sama pistepilven ruutu 67 s ->
+    310 s) ja Windows 11 hidastaa taustasäiettä (EcoQoS). Prioriteettia ei lasketa. Palauttaa, onnistuiko;
+    virheet ohitetaan (työkalu toimii silti)."""
+    import ctypes
+    import sys
+
+    try:
+        if sys.platform == "darwin":
+            libc = ctypes.CDLL("/usr/lib/libSystem.dylib")
+            libc.pthread_self.restype = ctypes.c_void_p
+            nyt, _ = ctypes.c_uint(), ctypes.c_int()
+            libc.pthread_get_qos_class_np(ctypes.c_void_p(libc.pthread_self()), ctypes.byref(nyt), ctypes.byref(_))
+            if nyt.value >= 0x19:                                             # QOS_CLASS_USER_INITIATED
+                return True
+            return libc.pthread_set_qos_class_self_np(0x19, 0) == 0
+        if sys.platform == "win32":
+            from ctypes import wintypes
+
+            class Tila(ctypes.Structure):     # THREAD_POWER_THROTTLING_STATE
+                _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG),
+                            ("StateMask", wintypes.ULONG)]
+
+            k32 = ctypes.windll.kernel32
+            saie = k32.GetCurrentThread()
+            if k32.GetThreadPriority(saie) < 0:
+                k32.SetThreadPriority(saie, 0)                               # THREAD_PRIORITY_NORMAL
+            tila = Tila(1, 1, 0)        # EXECUTION_SPEED-hidastus pois päältä
+            return bool(k32.SetThreadInformation(saie, 3, ctypes.byref(tila), ctypes.sizeof(tila)))
+    except Exception:
+        pass
+    return False
+
+
+class valveilla:
+    """Pitkä laskenta (with valveilla(): ...): käyttöjärjestelmä ei hidasta eikä nukahda kesken. macOS hidastaa
+    sovellusta, joka ei ole näkyvissä (App Nap): qgis_processilla 78 milj. pisteen ruuduittainen ajo hidastui
+    muutaman minuutin jälkeen nelinkertaiseksi, ja sama käy QGIS:lle, kun käyttäjä vaihtaa toiseen ohjelmaan.
+    NSProcessInfo.beginActivity (macOS) ja SetThreadExecutionState (Windows) estävät sen ajon ajaksi; myös
+    säikeen prioriteetti nostetaan (taysi_vauhti). Virheet ohitetaan."""
+
+    def __enter__(self):
+        import ctypes
+        import sys
+
+        self._loppu = None
+        taysi_vauhti()
+        try:
+            if sys.platform == "darwin":
+                objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+                ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Foundation.framework/Foundation")
+                objc.objc_getClass.restype = ctypes.c_void_p
+                objc.sel_registerName.restype = ctypes.c_void_p
+                vp = ctypes.c_void_p
+
+                def viesti(restype, *argtypes):
+                    return ctypes.cast(objc.objc_msgSend, ctypes.CFUNCTYPE(restype, vp, vp, *argtypes))
+
+                sel = objc.sel_registerName
+                info = viesti(vp)(objc.objc_getClass(b"NSProcessInfo"), sel(b"processInfo"))
+                syy = viesti(vp, ctypes.c_char_p)(objc.objc_getClass(b"NSString"), sel(b"stringWithUTF8String:"),
+                                                  b"Seinalinjat pistepilvesta")
+                # NSActivityUserInitiated (sisältää NSActivityIdleSystemSleepDisabled)
+                tunnus = viesti(vp, ctypes.c_uint64, vp)(info, sel(b"beginActivityWithOptions:reason:"),
+                                                          0x00FFFFFF | (1 << 20), syy)
+                if tunnus:
+                    viesti(vp)(tunnus, sel(b"retain"))
+                    self._loppu = lambda: (viesti(None, vp)(info, sel(b"endActivity:"), tunnus),
+                                           viesti(None)(tunnus, sel(b"release")))
+            elif sys.platform == "win32":
+                k32 = ctypes.windll.kernel32
+                k32.SetThreadExecutionState(0x80000001)          # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+                self._loppu = lambda: k32.SetThreadExecutionState(0x80000000)
+        except Exception:
+            self._loppu = None
+        return self
+
+    def __exit__(self, *_):
+        if self._loppu is not None:
+            try:
+                self._loppu()
+            except Exception:
+                pass
+        return False
+
+
+def ruudut(x0, y0, x1, y1, koko):
+    """Ruutuverkko alueelle (x0, y0, x1, y1): [(i, j, e0, n0)], ruudun vasen alakulma (e0, n0) koon
+    monikerroilla, joten samassa paikassa olevat ruudut ovat samat alueesta riippumatta."""
+    i0, j0 = math.floor(x0 / koko), math.floor(y0 / koko)
+    i1, j1 = math.floor(x1 / koko), math.floor(y1 / koko)
+    return [(i, j, i * koko, j * koko) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)]
+
+
+class Kattorasteri:
+    """Ilmakeilauksen kattopisteet (rakennusluokka) rasterina alueelle (x0, y0, x1, y1) solulla solu [m].
+    Ruuduittain lisätyt pisteet (lisaa) kootaan koko alueelle; seinat_pilvesta.roof_share mittaa linjoille
+    katon läheisyyden (aidat ja muurit pois)."""
+
+    def __init__(self, alue, solu=0.5):
+        import numpy as np
+
+        self.e0, self.n0 = float(alue[0]), float(alue[1])
+        self.solu = solu
+        self.rasteri = np.zeros((int((alue[2] - alue[0]) / solu) + 1, int((alue[3] - alue[1]) / solu) + 1), bool)
+
+    def lisaa(self, xy):
+        """xy (n x 2) kartan koordinaatteina (ETRS-GK25)."""
+        import numpy as np
+
+        q = np.floor((np.asarray(xy, float) - (self.e0, self.n0)) / self.solu).astype(np.int64)
+        ok = (q[:, 0] >= 0) & (q[:, 0] < self.rasteri.shape[0]) & (q[:, 1] >= 0) & (q[:, 1] < self.rasteri.shape[1])
+        self.rasteri[q[ok, 0], q[ok, 1]] = True
 
 
 def _ulkonormaali(viiva, a, b):
