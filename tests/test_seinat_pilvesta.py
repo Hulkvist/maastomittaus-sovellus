@@ -144,3 +144,16 @@ def test_short_piece_on_same_surface_does_not_drop_long_facade():
                     info={"korkeus": (1.9, 3.5), "pinta": 0.0})
     kept = {id(s) for s in _drop_upper_duplicates([long_, short, upper])}
     assert kept == {id(long_)}
+
+
+def test_line_does_not_continue_onto_fence_from_corner():
+    """1,8 m umpiaita jatkaa eteläseinää nurkasta 4 m: linja päättyy nurkkaan (iPhonen cover_top 1,8
+    hyväksyy aidan seinäsoluiksi, joten aita lyhennetään linjan päästä korkeuden perusteella)."""
+    rng = np.random.default_rng(11)
+    walls = [_surface(rng, (12, 0), (12, 8), 0, 3), _surface(rng, (12, 8), (0, 8), 0, 3),
+             _surface(rng, (0, 8), (0, 0), 0, 3), _surface(rng, (0, 0), (12, 0), 0, 3),
+             _surface(rng, (12, 0), (16, 0), 0, 1.8)]
+    xyz = np.vstack([_ground_ring(rng, (-4, -4), (20, 12), (0, 0), (12, 8))] + walls)
+    south = _south(extract_walls(xyz, WallOptions.for_cloud(xyz, "iphone")))
+    assert south, "eteläseinä puuttuu"
+    assert max(max(s.p0[0], s.p1[0]) for s in south) < 12.3, [(s.p0, s.p1) for s in south]

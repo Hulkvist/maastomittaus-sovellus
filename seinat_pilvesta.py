@@ -83,9 +83,20 @@ class WallOptions:
     # on enintään floor_raise ympäristön (8 m) alimman maan yläpuolella. Ikkunoista näkyvä sisälattia on
     # talon sisällä alin pinta ja näytti maalta, jolloin sisäseinien linjat jäivät (Katajaharju, sim/lasi).
     floor_raise: float = 0.3
+    slope_min: float = 0.3       # julkisivun korkeudet seinän keskimääräisestä maasta, kun maa vaihtelee enemmän [m]
     sure_length: float = 2.0     # tätä pidempi julkisivullinen seinä on SEINA, vaikka se on vino pääsuuntaan
     general_depth: float = 0.5
     general_width: float = 2.0
+    # Pensassuodatin: pensaan reunasta löytyy "julkisivu" vain ohuelta korkeusväliltä ja se kohisee (virtuaali-
+    # keilaus: 0,2–0,4 m ja 19–23 mm; seinät 1,3–2,4 m ja 6–10 mm). Molempien on täytyttävä, jotta matala seinä
+    # ikkunanauhan alla (0,4–1,1 m) säilyy.
+    bush_span: float = 0.5       # julkisivun korkeusväli alle [m] ...
+    bush_noise: float = 0.015    # ... ja kohina yli [m] -> linja pois (0 = ei suodatinta)
+    # Aita seinälinjan jatkeena (_trim_fences): linjan päästä pois vähintään fence_min matala osuus, jonka ylin
+    # piste on alle fence_top ja vähintään fence_drop linjan tyypillistä matalampi (0 = ei lyhennystä)
+    fence_top: float = 2.2
+    fence_drop: float = 0.5
+    fence_min: float = 0.75
     seed: int = 0
 
     @classmethod
@@ -101,8 +112,12 @@ class WallOptions:
 # palat voivat olla eri kohdissa). Stonex: tiheä ja tarkka, raskas (kymmeniä miljoonia pisteitä).
 PROFILES = {
     "iphone": {},
-    "stonex": dict(voxel=0.03, wall_cell=0.03, cover_top=2.2, cover_near=False, facade_max=3.5, inlier_tol=0.03,
-                   wall_offset=0.04, outline_offset=0.06, facade_tol=0.01),
+    # cover_top 2,0 (oli 2,2): 2,0 m matala seinä löytyy (räystään alapinta riittää); oikeissa pilvissä
+    # kattavuus parani 4/5 kohteessa, roskaa vähän lisää. 1,8: roskaa selvästi enemmän (Käärmetalo +85 m).
+    # Pensassuodatin pois: oikeissa Stonex-pilvissä pitkienkin seinien julkisivu oli ohut ja kohiseva (Kruna2
+    # 30 m, Katajaharju 17 m); viidessä kohteessa suodatin pudotti seiniä yhtä paljon kuin roskaa.
+    "stonex": dict(voxel=0.03, wall_cell=0.03, cover_top=2.0, cover_near=False, facade_max=3.5, inlier_tol=0.03,
+                   wall_offset=0.04, outline_offset=0.06, facade_tol=0.01, bush_noise=0.0),
 }
 
 
@@ -160,11 +175,14 @@ def ground_sample(xyz: np.ndarray, n: int = 5_000_000) -> np.ndarray:
 
 
 class Ground:
-    """Paikallinen maanpinta ruudukkona: ruudun alin 2 %-piste, ja jokainen ruutu saa naapuriruutujensa
-    (3 x 3) matalimman arvon (seinäruuduissa ei ole maata). Tyhjät ruudut täytetään naapureista, joten
-    korkeuden saa myös muille kuin ruudukon laskemiseen käytetyille pisteille (at)."""
+    """Paikallinen maanpinta ruudukkona: ruudun alin 2 %-piste (enintään 50. alin), ja jokainen ruutu saa
+    naapuriruutujensa (3 x 3) matalimman arvon (seinäruuduissa ja talon sisällä ei ole maata). Naapurin arvo
+    siirretään ensin maaston kaltevuudella ruudun kohdalle: rinteessä 2 m:n päässä alarinteessä oleva naapuri
+    teki maasta 0,2–0,4 m liian matalan (10 % rinne), jolloin sokkeli näytti kivijalalta. Kaltevuus on
+    korjaamattoman minimin gradientista (ei sisälattioita), tasamaalla korjaus on nolla. Tyhjät ruudut
+    täytetään naapureista, joten korkeuden saa myös muille kuin ruudukon laskemiseen käytetyille pisteille (at)."""
 
-    def __init__(self, xyz: np.ndarray, cell: float):
+    def __init__(self, xyz: np.ndarray, cell: float, max_slope: float = 0.3):
         self.cell = cell
         ij = np.floor(xyz[:, :2] / cell).astype(np.int64)
         self.off = ij.min(0)
@@ -176,17 +194,31 @@ class Ground:
         starts = np.flatnonzero(np.r_[True, fs[1:] != fs[:-1]])
         counts = np.diff(np.r_[starts, len(fs)])
         low = np.full(self.shape[0] * self.shape[1], np.inf)
-        low[fs[starts]] = xyz[order[starts + (0.02 * counts).astype(np.int64)], 2]
+        # 2 %-piste, mutta enintään 50. alin: seinän vieressä maata voi olla alle 2 % ruudun pisteistä (pensas,
+        # harvennettu maa), jolloin 2 %-piste osuisi seinään
+        low[fs[starts]] = xyz[order[starts + np.minimum((0.02 * counts).astype(np.int64), 49)], 2]
         low = low.reshape(self.shape)
-        grid = self._min3(low)
-        # Tyhjät ruudut naapureista (enintään 50 kierrosta), lopuksi koko pilven alin taso
+        rough = self._fill(self._min3(low), xyz)
+        if min(rough.shape) > 1:
+            gx, gy = (np.clip(g, -max_slope, max_slope) for g in np.gradient(rough, cell))
+        else:
+            gx = gy = np.zeros_like(rough)
+        p = np.pad(low, 1, constant_values=np.inf)
+        n0, n1 = low.shape
+        grid = np.min([p[1 + di:n0 + 1 + di, 1 + dj:n1 + 1 + dj] - (gx * di + gy * dj) * cell
+                       for di in (-1, 0, 1) for dj in (-1, 0, 1)], axis=0)
+        self.grid = self._fill(grid, xyz)
+
+    @classmethod
+    def _fill(cls, grid: np.ndarray, xyz: np.ndarray) -> np.ndarray:
+        """Tyhjät ruudut naapureista (enintään 50 kierrosta), lopuksi koko pilven alin taso."""
         for _ in range(50):
             empty = ~np.isfinite(grid)
             if not empty.any():
                 break
-            grid = np.where(empty, self._min3(grid), grid)
+            grid = np.where(empty, cls._min3(grid), grid)
         grid[~np.isfinite(grid)] = float(np.min(xyz[:, 2]))
-        self.grid = grid
+        return grid
 
     @staticmethod
     def _min3(a: np.ndarray) -> np.ndarray:
@@ -502,14 +534,23 @@ def _facade(layers: np.ndarray, opt: WallOptions):
 
 
 def _near_points(seg: Segment, xyz: np.ndarray, rel: np.ndarray, index: _GridIndex, opt: WallOptions, pad: float = 0.1):
-    """Suoran ympäristön pisteet suoran koordinaateissa: (s pituussuunnassa, t normaalin suunnassa, h maasta)."""
+    """Suoran ympäristön pisteet suoran koordinaateissa: (s pituussuunnassa, t normaalin suunnassa, h maasta).
+    Rinteessä (maa vaihtelee seinän matkalla yli slope_min) h on seinän keskimääräisestä maasta: sokkelin yläreuna
+    on vaakasuora, ja paikallisesta maasta mitattuna sokkeli ja julkisivu sekoittuisivat samoille korkeuksille.
+    Alimmasta maasta mitattuna alarinteen pää näyttäisi kivijalalta (sokkeli yli plinth_max)."""
     lo = np.minimum(seg.p0, seg.p1) - opt.search - pad
     hi = np.maximum(seg.p0, seg.p1) + opt.search + pad
     idx = index.box(lo, hi)
     rel_p = xyz[idx, :2] - seg.p0
     sv, tv = rel_p @ seg.direction, rel_p @ seg.normal
     sel = (sv >= -pad) & (sv <= seg.length + pad) & (np.abs(tv) <= opt.search)
-    return idx[sel], sv[sel], tv[sel], rel[idx[sel]]
+    idx, hv = idx[sel], rel[idx[sel]]
+    if len(idx) and opt.slope_min > 0:
+        ground = xyz[idx, 2] - hv
+        g_lo, g_mid, g_hi = np.percentile(ground, [2, 50, 98])
+        if g_hi - g_lo > opt.slope_min:
+            hv = xyz[idx, 2] - g_mid
+    return idx, sv[sel], tv[sel], hv
 
 
 def refine_segment(seg: Segment, xyz: np.ndarray, rel: np.ndarray, index: _GridIndex,
@@ -1144,6 +1185,10 @@ def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segme
     if opt.refine and segs:
         wall_info(segs, pts, rel, index, opt)
         segs = _drop_upper_duplicates(segs)
+        if opt.bush_noise > 0 and not opt.straighten:      # käännetty linja osuu pintaan vain osin
+            segs = [s for s in segs if not _bush(s, opt)]
+        if opt.fence_top > 0:
+            segs = close_corners(_trim_fences(segs, pts, rel, index, opt), opt)
         # Pitkä seinä, jolta julkisivu löytyi, on varma suunnasta riippumatta (vinot korttelit)
         for s in segs:
             if s.length >= opt.sure_length and s.info.get("kohina") is not None:
@@ -1198,6 +1243,63 @@ def facade_check(xyz: np.ndarray, segments: list[Segment], opt: WallOptions | No
                 rows.append((sk, np.nan))
         out.append(np.array(rows).reshape(-1, 2))
     return out
+
+
+def _trim_fences(segs: list[Segment], xyz: np.ndarray, rel: np.ndarray, index: _GridIndex, opt: WallOptions,
+                 step: float = 0.25) -> list[Segment]:
+    """Aita seinän jatkeena: linjan päistä pois osuus, jossa ylin piste (enintään search sivussa ja
+    fence_top + 0,6 korkeudella) jää alle
+    fence_top ja vähintään fence_drop linjan tyypillistä ylintä pistettä matalammaksi (virtuaalikeilaus: talo
+    3,2 m räystäineen, nurkasta jatkuva aita 1,8 m). Matalan piharakennuksen koko linja on samaa korkeutta,
+    eikä se lyhene. Tyhjät kohdat (katveeseen jatkettu nurkka) eivät ole matalia, mutta matalan osuuden takana
+    ne lähtevät sen mukana. Matalaa vähintään fence_min, ettei yksittäinen ikkuna-aukko lyhennä seinää."""
+    out = []
+    for seg in segs:
+        _, sv, tv, hv = _near_points(seg, xyz, rel, index, opt, pad=0.0)
+        n = max(1, int(np.ceil(seg.length / step)))
+        k = np.clip((sv / step).astype(np.int64), 0, n - 1)
+        # Ylin piste enintään fence_top + 0,6: räystäs ulottuu nurkan yli aidan yläpuolelle, mutta sen alla on tyhjää
+        cap = hv < opt.fence_top + 0.6
+        top = np.full(n, -np.inf)
+        np.maximum.at(top, k[cap], hv[cap])
+        seen = np.isfinite(top)
+        if seen.sum() < 4:
+            out.append(seg)
+            continue
+        limit = min(opt.fence_top, float(np.median(top[seen])) - opt.fence_drop)
+        low = seen & (top < limit)
+        start, end = 0, n
+        for forward in (True, False):
+            run = 0
+            idx = range(n) if forward else range(n - 1, -1, -1)
+            cut = None
+            for i in idx:
+                if seen[i] and not low[i]:
+                    break
+                run += int(low[i])
+                cut = i
+            if cut is not None and run * step >= opt.fence_min:
+                if forward:
+                    start = cut + 1
+                else:
+                    end = cut
+        if start == 0 and end == n:
+            out.append(seg)
+            continue
+        if (end - start) * step < opt.min_length:
+            continue
+        a, length = seg.p0.copy(), seg.length
+        u = (seg.p1 - a) / length
+        seg.p0 = a + u * (start * step)
+        seg.p1 = a + u * min(end * step, length)
+        out.append(seg)
+    return out
+
+
+def _bush(seg: Segment, opt: WallOptions) -> bool:
+    """Pensaan reuna (ks. WallOptions.bush_span): ohut ja kohiseva julkisivu."""
+    h, noise = seg.info.get("korkeus"), seg.info.get("kohina")
+    return h is not None and noise is not None and h[1] - h[0] < opt.bush_span and noise > opt.bush_noise
 
 
 def _drop_upper_duplicates(segs: list[Segment], side: float = 0.35, angle_deg: float = 10.0) -> list[Segment]:
