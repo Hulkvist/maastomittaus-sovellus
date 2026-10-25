@@ -1,8 +1,8 @@
 """
 seinalinjan_muokkain.py -- Seinälinjan muokkauskartta sovellukseen (Streamlitin oma komponentti,
 st.components.v2): kärkiä raahataan hiirellä ja ne napsahtavat mitattuun pisteeseen tai toisen viivan
-kärkeen, viivaa klikkaamalla tulee uusi kärki, viivan oikea klikkaus poistaa janan ja kärjen tuplaklikkaus
-(tai oikea klikkaus) poistaa kärjen.
+kärkeen, viivaa klikkaamalla tulee uusi kärki, viivan oikea klikkaus poistaa janan ja kärjen oikea klikkaus
+poistaa kärjen. Kolmen pisteen tai kärjen tuplaklikkaus peräkkäin täydentää ne suorakulmioksi.
 
 Kartta toimii selaimessa WGS84:ssä (Leaflet samasta CDN:stä kuin foliumin kartat). Muokkaus palaa
 Pythonille tapahtumana, ja muokkaukseksi() tekee siitä seinalinja.sovella_muokkaukset()-muokkauksen
@@ -31,6 +31,8 @@ _CSS = """
 .slm-piirto button { font-size: 13px; margin: 0 2px; padding: 3px 8px; cursor: pointer; }
 .slm-piirto .slm-ohje { font-size: 12px; margin: 4px 2px 0; color: #333; max-width: 260px; }
 .slm-piirtaa { cursor: crosshair !important; }
+.slm-kulma { background: #ff7f0e; color: #fff; border-radius: 50%; font: bold 11px sans-serif;
+             text-align: center; line-height: 16px; box-shadow: 0 0 0 2px #fff; }
 """
 
 _JS = """
@@ -83,6 +85,7 @@ function luoPiirto(L, tila) {
   // tila: false, true (uusi viiva), "jatka" tai "yhdista"
   function aseta(t) {
     const paalla = !!t;
+    tila.tyhjennaKulmat();
     piirto.paalla = t === true;
     tila.tyokalu = typeof t === "string" ? t : null;
     piirto.valittu = null;
@@ -146,7 +149,45 @@ function luoPiirto(L, tila) {
 
   kartta.on("click", (e) => { if (piirto.paalla) piirto.lisaa(...tila.piirtokohta(e.latlng)); });
   kartta.on("dblclick", (e) => { if (piirto.paalla) { L.DomEvent.stop(e); piirto.valmis(); } });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && (piirto.paalla || tila.tyokalu)) aseta(false); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (piirto.paalla || tila.tyokalu) aseta(false); else tila.tyhjennaKulmat();
+  });
+}
+
+// Suorakulmio kartalta: kolmen pisteen tai kärjen tuplaklikkaus peräkkäin (saman uudelleen = valinta pois,
+// Esc tyhjentää). Kolmas valinta lähettää kulmat Pythonille (suorakulmion_neljas laskee neljännen).
+function luoKulmavalinta(L, tila) {
+  const taso = L.layerGroup().addTo(tila.kartta);
+  tila.kulmat = [];
+  const ohje = () => tila.piirto.div.querySelector(".slm-ohje");
+  function piirra() {
+    taso.clearLayers();
+    tila.kulmat.forEach((k, i) => L.marker(k.ll, { icon: L.divIcon({ className: "slm-kulma", iconSize: [16, 16],
+                                                                      html: String(i + 1) }), interactive: false })
+      .addTo(taso));
+    const o = ohje();
+    if (tila.piirto.paalla || tila.tyokalu) return;
+    o.style.display = tila.kulmat.length ? "" : "none";
+    o.textContent = tila.kulmat.length
+      ? `Suorakulmio: ${tila.kulmat.length}/3 kulmaa. Tuplaklikkaa seuraavaa kulmaa (sama uudelleen = pois, Esc = tyhjennä).`
+      : "";
+  }
+  tila.tyhjennaKulmat = () => { tila.kulmat = []; piirra(); };
+  tila.valitseKulma = (ll, sijainti) => {
+    if (tila.piirto.paalla || tila.tyokalu) return;
+    const avain = `${ll.lat.toFixed(7)},${ll.lng.toFixed(7)}`;
+    const i = tila.kulmat.findIndex((k) => k.avain === avain);
+    if (i >= 0) tila.kulmat.splice(i, 1); else tila.kulmat.push({ ll, sijainti, avain });
+    if (tila.kulmat.length === 3) {
+      const kulmat = tila.kulmat.map((k) => k.sijainti);
+      tila.kulmat = [];
+      piirra();
+      tila.setTriggerValue("muokkaus", { tyyppi: "suorakulmio", kulmat });
+      return;
+    }
+    piirra();
+  };
 }
 
 export default async function (component) {
@@ -174,6 +215,7 @@ export default async function (component) {
     const ryhma = L.layerGroup().addTo(kartta);
     tila = parentElement.__slm = { kartta, ryhma, rajattu: null };
     luoPiirto(L, tila);
+    luoKulmavalinta(L, tila);
   }
   const { kartta, ryhma } = tila;
   ryhma.clearLayers();
@@ -217,6 +259,7 @@ export default async function (component) {
         L.DomEvent.stop(e);
         tila.piirto.lisaa(L.latLng(p[0], p[1]), { piste: i });
       })
+      .on("dblclick", (e) => { L.DomEvent.stop(e); tila.valitseKulma(L.latLng(p[0], p[1]), { piste: i }); })
       .addTo(ryhma);
   });
 
@@ -266,13 +309,16 @@ export default async function (component) {
         setTriggerValue("muokkaus", { tyyppi: "siirra", viiva: v.nimi, karki: j,
                                       ...sijainti(ll, { viiva: v.nimi, karki: j }) });
       });
-      const poista = (e) => {
+      m.on("dblclick", (e) => {
         L.DomEvent.stop(e);
-        if (tila.piirto.paalla) { if (e.type === "dblclick") tila.piirto.valmis(); return; }
+        if (tila.piirto.paalla) { tila.piirto.valmis(); return; }
+        tila.valitseKulma(L.latLng(k[0], k[1]), { kohde_viiva: v.nimi, kohde_karki: j });
+      });
+      m.on("contextmenu", (e) => {
+        L.DomEvent.stop(e);
+        if (tila.piirto.paalla) return;
         setTriggerValue("muokkaus", { tyyppi: "poista", viiva: v.nimi, karki: j });
-      };
-      m.on("dblclick", poista);
-      m.on("contextmenu", poista);
+      });
       m.on("click", (e) => {
         if (tila.tyokalu) { L.DomEvent.stop(e); tila.tyokaluKlikkaus(v, L.latLng(k[0], k[1])); return; }
         if (!tila.piirto.paalla) return;
@@ -369,9 +415,32 @@ def _koordinaatit(sijainti, tulos, kohteet):
     return {"e": round(e, 3), "n": round(n, 3), "z": None, "nimi": None, "laji": None}
 
 
-def muokkaukseksi(tapahtuma, tulos, kohteet, uuden_nimi="Uusi viiva"):
+def suorakulmio(kulmat, nimi, pohja):
+    """Kolmesta kulmasta ({"e", "n", "z", "nimi", "laji"}) suorakulmion muokkaus (seinalinja.sovella_muokkaukset):
+    kulmat kehän järjestykseen ja neljäs lasketuksi (seinalinja.suorakulmion_neljas). ValueError, jos kulmissa
+    on sama piste kahdesti tai mikään kulma ei ole 90 ± SUORAKULMIO_MAX_KULMA astetta."""
+    if len({(round(k["e"], 3), round(k["n"], 3)) for k in kulmat}) < 3:
+        raise ValueError("Valitse kolme eri pistettä.")
+    r = sl.suorakulmion_neljas(*((k["e"], k["n"]) for k in kulmat))
+    karjet = [{"e": kulmat[i]["e"], "n": kulmat[i]["n"], "z": kulmat[i].get("z"), "nimi": kulmat[i].get("nimi"),
+               "laji": kulmat[i].get("laji") or "laskettu"} for i in r["jarjestys"]]
+    karjet.append({"e": round(r["neljas"][0], 3), "n": round(r["neljas"][1], 3), "z": None, "nimi": "suorakulmio",
+                   "laji": "laskettu"})
+    return {"tyyppi": "suorakulmio", "nimi": nimi, "pohja": pohja, "karjet": karjet,
+            "kulma": r["kulma"], "lavistajaero": r["lavistajaero"]}
+
+
+def muokkaukseksi(tapahtuma, tulos, kohteet, uuden_nimi="Uusi viiva", suorakulmion_nimi="Suorakulmio 1"):
     """Kartan tapahtuma seinalinja.sovella_muokkaukset()-muokkaukseksi EPSG:3879:ssä. uuden_nimi = piirretyn
-    uuden viivan nimi."""
+    uuden viivan nimi, suorakulmion_nimi = kartalta kolmen kulman tuplaklikkauksella täydennetyn nimi."""
+    if tapahtuma["tyyppi"] == "suorakulmio":
+        kulmat = [_koordinaatit(s, tulos, kohteet) for s in tapahtuma["kulmat"]]
+        for k, s in zip(kulmat, tapahtuma["kulmat"]):
+            k["laji"] = k["laji"] or ("mitattu" if k["nimi"] else "käsin")
+            k["nimi"] = k["nimi"] or "kulma"
+        pohja = next((s["kohde_viiva"] for s in tapahtuma["kulmat"] if s.get("kohde_viiva")),
+                     tulos["viivat"][0]["nimi"] if tulos["viivat"] else None)
+        return suorakulmio(kulmat, suorakulmion_nimi, pohja)
     if tapahtuma["tyyppi"] == "uusi_viiva":
         karjet = [_koordinaatit(s, tulos, kohteet) for s in tapahtuma["karjet"]]
         for k in karjet:
@@ -411,5 +480,6 @@ def kuvaus(m):
     if m["tyyppi"] == "piste":
         return f"laskettu piste {m['nimi']} (A {m['a']}, B {m['b']}, a {m['a_mitta']:g} m, b {m['b_mitta']:g} m)"
     if m["tyyppi"] == "suorakulmio":
-        return "kolmesta kulmasta täydennetty suorakulmio"
+        kulma = f" (suora kulma {m['kulma']:.1f}°)" if m.get("kulma") is not None else ""
+        return f"{m.get('nimi', 'suorakulmio')}: kolmesta kulmasta täydennetty{kulma}"
     return str(m)

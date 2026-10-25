@@ -73,3 +73,28 @@ def test_laskettu_piste_napsahduskohteena():
                           uusi, kohteet)
     assert [k["laji"] for k in u["karjet"]] == ["mitattu", "laskettu"]
     assert "laskettu piste L1" in slm.kuvaus(m)
+
+
+def test_suorakulmio_kolmesta_tuplaklikkauksesta():
+    """Kartalla kolmen pisteen tai kärjen tuplaklikkaus -> suorakulmio (neljäs kulma lasketaan)."""
+    tulos, pisteet = _tulos()
+    kohteet = slm.napsahduspisteet(pisteet)
+    viiva = tulos["viivat"][0]["nimi"]
+    karki = next(j for j, k in enumerate(tulos["viivat"][0]["karjet"]) if (k["e"], k["n"]) == (E0, N0 + 8))
+    m = slm.muokkaukseksi({"tyyppi": "suorakulmio", "kulmat": [{"piste": 1}, {"piste": 0},
+                                                               {"kohde_viiva": viiva, "kohde_karki": karki}]},
+                          tulos, kohteet, suorakulmion_nimi="Suorakulmio 2")
+    assert m["nimi"] == "Suorakulmio 2" and m["pohja"] == viiva and abs(m["kulma"] - 90) < 1e-6
+    assert (m["karjet"][3]["e"], m["karjet"][3]["n"]) == pytest.approx((E0 + 10, N0 + 8))
+    assert [k["laji"] for k in m["karjet"]] == ["mitattu", "mitattu", "mitattu", "laskettu"]
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    assert uusi["viivat"][-1]["suljettu"] and len(uusi["viivat"][-1]["karjet"]) == 4
+    assert "Suorakulmio 2" in slm.kuvaus(m) and "90.0°" in slm.kuvaus(m)
+    # Sama piste kahdesti tai vino kulma: ValueError (sovellus näyttää varoituksen)
+    with pytest.raises(ValueError):
+        slm.muokkaukseksi({"tyyppi": "suorakulmio", "kulmat": [{"piste": 0}, {"piste": 0}, {"piste": 1}]},
+                          tulos, kohteet)
+    lat, lon = hk._latlon_muunnin()(E0 + 13.0, N0 + 3.0)
+    with pytest.raises(ValueError):
+        slm.muokkaukseksi({"tyyppi": "suorakulmio", "kulmat": [{"piste": 0}, {"piste": 1}, {"lat": lat, "lon": lon}]},
+                          tulos, kohteet)
