@@ -46,7 +46,7 @@ def virheet(at):
 def test_kirjautuminen():
     at = sovellus(kirjautunut=False)
     assert len(at.text_input) == 1 and not at.tabs
-    assert at.title[0].value == "Kiintopisteiden, rajamerkkien ja rakennusten nurkkien haku"
+    assert at.title[0].value == "Maastomittauksen apuri"
     at.text_input[0].set_value("väärä").run()
     assert any("Väärä salasana" in e.value for e in at.error)
     at.text_input[0].set_value(SALASANA).run()

@@ -22,7 +22,9 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
-OTSIKKO = "Kiintopisteiden, rajamerkkien ja rakennusten nurkkien haku"
+OTSIKKO = "Maastomittauksen apuri"
+KUVAUS = ("Kiintopisteet, rajamerkit ja nurkat kiinteistölle · JobXML-mittausten raportti ja seinälinja · "
+          "tallennus kantaan")
 st.set_page_config(page_title=OTSIKKO, layout="wide")
 
 for _avain in ("MML_API_KEY", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER",
@@ -134,6 +136,7 @@ def _tiedostona(kirjoita, nimi):
 
 st.image("kuvat/koirat_kuplat.jpg", width="stretch")  # alkuperäinen ilman kuplia: kuvat/koirat.jpg
 st.title(OTSIKKO)
+st.caption(KUVAUS)
 
 if not hk.MML_API_KEY:
     st.error(

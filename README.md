@@ -1,4 +1,4 @@
-# Kiintopisteiden, rajamerkkien ja rakennusten nurkkien haku
+# Maastomittauksen apuri
 
 Streamlit-sovellus, jolla:
 
