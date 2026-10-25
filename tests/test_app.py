@@ -405,3 +405,31 @@ def test_seinalinja_lidar_dxf(monkeypatch, tmp_path):
     tekstit = [c.value for c in at.caption]
     assert any(t.startswith("LiDAR: ") for t in tekstit), tekstit
     assert any("poikkeaa LiDAR-seinistä keskimäärin" in t for t in tekstit), tekstit
+
+
+def test_poisto_vain_poistosalasanalla(monkeypatch):
+    import jobxml_tuonti as jx
+
+    poista = mock.Mock(return_value=(3, 1, 1))
+    monkeypatch.setattr(jx, "poista_mittaukset_kannasta", poista)
+    napit = lambda at: {b.key for b in at.button}   # noqa: E731
+    # Ilman asetettua poistosalasanaa poistot eivät ole käytössä
+    at = sovellus()
+    assert "poista_nappi_1" not in napit(at) and "oma_kp_poista" not in napit(at)
+    assert any("POISTON_SALASANA" in i.value for i in at.info)
+    # Väärä salasana: ei poistoa; oikea: poisto auki koko istunnoksi
+    at = AppTest.from_file(os.path.join(JUURI, "app.py"), default_timeout=120)
+    at.secrets["SOVELLUKSEN_SALASANA"] = SALASANA
+    at.secrets["POISTON_SALASANA"] = "poisto123"
+    at.session_state["_kirjautunut"] = True
+    at.run()
+    assert "poista_nappi_1" not in napit(at)
+    at.text_input(key="_poistosalasana_mittaukset").set_value("väärä").run()
+    assert any("Väärä poistosalasana" in e.value for e in at.error) and "poista_nappi_1" not in napit(at)
+    at.text_input(key="_poistosalasana_mittaukset").set_value("poisto123").run()
+    assert "poista_nappi_1" in napit(at)
+    at.text_input(key="poisto_tunnus").set_value("91-1-2-3").run()
+    at.checkbox(key="poisto_vahvistus_1").check().run()
+    at.button(key="poista_nappi_1").click().run()
+    poista.assert_called_once()
+    assert not virheet(at)

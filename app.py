@@ -52,6 +52,30 @@ def _tarkista_salasana():
 
 if not _tarkista_salasana():
     st.stop()
+
+
+def _poisto_sallittu(avain):
+    """Poistot vain poistosalasanalla (secrets: POISTON_SALASANA), erillään sovelluksen salasanasta: muut
+    sovelluksen käyttäjät eivät voi poistaa kannasta. Salasana kysytään kerran istunnossa. Ilman asetettua
+    salasanaa poistot ovat pois käytöstä."""
+    import hmac
+
+    oikea = st.secrets.get("POISTON_SALASANA")
+    if not oikea:
+        st.info("Poisto ei ole käytössä: poistosalasanaa (POISTON_SALASANA) ei ole asetettu sovelluksen "
+                "salaisuuksiin.")
+        return False
+    if st.session_state.get("_poisto_auki"):
+        return True
+    syotetty = st.text_input("Poistosalasana", type="password", key=f"_poistosalasana_{avain}",
+                             help="Vain ylläpitäjä voi poistaa tietoja kannasta.")
+    if syotetty:
+        if hmac.compare_digest(syotetty.encode(), str(oikea).encode()):
+            st.session_state["_poisto_auki"] = True
+            return True
+        st.error("Väärä poistosalasana.")
+    return False
+
 import hae_kiintopisteet as hk
 import jobxml_tuonti as jx
 import mittausraportti as mr
@@ -464,14 +488,15 @@ with st.expander("Tuo omat kiintopisteet (txt/krd, ETRS-GK25)"):
                 st.error(f"Tallennus epäonnistui: {e}")
 
     st.markdown("---")
-    vahvistus_omat = st.checkbox("Vahvistan: poista kaikki omat (tiedostosta tuodut) kiintopisteet kannasta",
-                                 key="oma_kp_poisto_vahvistus")
-    if st.button("Poista omat kiintopisteet", key="oma_kp_poista"):
-        if not vahvistus_omat:
-            st.warning("Rastita vahvistus ennen poistoa.")
-        else:
-            maara = hk.poista_omat_kiintopisteet(hk.DB_CONN)
-            st.success(f"{maara} omaa kiintopistettä poistettu. MML:n kiintopisteet jäivät ennalleen.")
+    if _poisto_sallittu("omat_kp"):
+        vahvistus_omat = st.checkbox("Vahvistan: poista kaikki omat (tiedostosta tuodut) kiintopisteet kannasta",
+                                     key="oma_kp_poisto_vahvistus")
+        if st.button("Poista omat kiintopisteet", key="oma_kp_poista"):
+            if not vahvistus_omat:
+                st.warning("Rastita vahvistus ennen poistoa.")
+            else:
+                maara = hk.poista_omat_kiintopisteet(hk.DB_CONN)
+                st.success(f"{maara} omaa kiintopistettä poistettu. MML:n kiintopisteet jäivät ennalleen.")
 
 
 # ---------------------------------------------------------------------------
@@ -1320,53 +1345,54 @@ st.caption(
     "väliaikaistaulut). Tässä voi siivota vanhoja tai virheellisiä tuonteja."
 )
 
-poisto_tapa = st.radio(
-    "Mitä haluat poistaa?",
-    ["Yhden kiinteistön kaikki mittaukset", "Vain yhden JobXML-tiedoston tuomat pisteet", "KOKO taulu (kaikki kiinteistöt)"],
-    key="poisto_tapa",
-)
-
-if poisto_tapa == "Yhden kiinteistön kaikki mittaukset":
-    poisto_tunnus = st.text_input("Kiinteistötunnus, jonka mittaukset poistetaan", key="poisto_tunnus")
-    vahvistus = st.checkbox(f"Vahvistan: poista kaikki tallennetut mittaukset kiinteistölle '{poisto_tunnus}'", key="poisto_vahvistus_1")
-    if st.button("Poista", key="poista_nappi_1"):
-        if not poisto_tunnus.strip():
-            st.warning("Anna kiinteistötunnus.")
-        elif not vahvistus:
-            st.warning("Rastita vahvistus ennen poistoa.")
-        else:
-            maara, viivoja, raportteja = jx.poista_mittaukset_kannasta(poisto_tunnus.strip(), hk.DB_CONN)
-            st.success(f"{maara} pistettä, {viivoja} seinälinjaa ja {raportteja} raporttia poistettu "
-                       f"kiinteistöltä {poisto_tunnus.strip()}.")
-
-elif poisto_tapa == "Vain yhden JobXML-tiedoston tuomat pisteet":
-    poisto_tiedosto = st.text_input(
-        "Lähdetiedoston nimi (esim. torpparimaentie.xml -- sama nimi kuin ladatussa tiedostossa)",
-        key="poisto_tiedosto",
+if _poisto_sallittu("mittaukset"):
+    poisto_tapa = st.radio(
+        "Mitä haluat poistaa?",
+        ["Yhden kiinteistön kaikki mittaukset", "Vain yhden JobXML-tiedoston tuomat pisteet", "KOKO taulu (kaikki kiinteistöt)"],
+        key="poisto_tapa",
     )
-    vahvistus2 = st.checkbox(f"Vahvistan: poista kaikki pisteet, jotka tulivat tiedostosta '{poisto_tiedosto}'", key="poisto_vahvistus_2")
-    if st.button("Poista", key="poista_nappi_2"):
-        if not poisto_tiedosto.strip():
-            st.warning("Anna tiedoston nimi.")
-        elif not vahvistus2:
-            st.warning("Rastita vahvistus ennen poistoa.")
-        else:
-            maara, viivoja, raportteja = jx.poista_mittaukset_lahdetiedostolla(poisto_tiedosto.strip(), hk.DB_CONN)
-            st.success(f"{maara} pistettä, {viivoja} seinälinjaa ja {raportteja} raporttia poistettu "
-                       f"tiedostosta {poisto_tiedosto.strip()}.")
 
-else:
-    st.warning("Tämä poistaa KAIKKIEN kiinteistöjen KAIKKI tallennetut mittaukset peruuttamattomasti.")
-    vahvistus3 = st.checkbox("Vahvistan: tyhjennä kaikki tallennetut mittaukset (pisteet, seinälinjat, "
-                             "raportit ja asemapisteet)",
-                             key="poisto_vahvistus_3")
-    if st.button("Tyhjennä koko taulu", key="poista_nappi_3"):
-        if not vahvistus3:
-            st.warning("Rastita vahvistus ennen tyhjennystä.")
-        else:
-            maara, viivoja, raportteja = jx.poista_kaikki_mittaukset(hk.DB_CONN)
-            st.success(f"Taulut tyhjennetty -- {maara} pistettä, {viivoja} seinälinjaa ja {raportteja} "
-                       "raporttia poistettu.")
+    if poisto_tapa == "Yhden kiinteistön kaikki mittaukset":
+        poisto_tunnus = st.text_input("Kiinteistötunnus, jonka mittaukset poistetaan", key="poisto_tunnus")
+        vahvistus = st.checkbox(f"Vahvistan: poista kaikki tallennetut mittaukset kiinteistölle '{poisto_tunnus}'", key="poisto_vahvistus_1")
+        if st.button("Poista", key="poista_nappi_1"):
+            if not poisto_tunnus.strip():
+                st.warning("Anna kiinteistötunnus.")
+            elif not vahvistus:
+                st.warning("Rastita vahvistus ennen poistoa.")
+            else:
+                maara, viivoja, raportteja = jx.poista_mittaukset_kannasta(poisto_tunnus.strip(), hk.DB_CONN)
+                st.success(f"{maara} pistettä, {viivoja} seinälinjaa ja {raportteja} raporttia poistettu "
+                           f"kiinteistöltä {poisto_tunnus.strip()}.")
+
+    elif poisto_tapa == "Vain yhden JobXML-tiedoston tuomat pisteet":
+        poisto_tiedosto = st.text_input(
+            "Lähdetiedoston nimi (esim. torpparimaentie.xml -- sama nimi kuin ladatussa tiedostossa)",
+            key="poisto_tiedosto",
+        )
+        vahvistus2 = st.checkbox(f"Vahvistan: poista kaikki pisteet, jotka tulivat tiedostosta '{poisto_tiedosto}'", key="poisto_vahvistus_2")
+        if st.button("Poista", key="poista_nappi_2"):
+            if not poisto_tiedosto.strip():
+                st.warning("Anna tiedoston nimi.")
+            elif not vahvistus2:
+                st.warning("Rastita vahvistus ennen poistoa.")
+            else:
+                maara, viivoja, raportteja = jx.poista_mittaukset_lahdetiedostolla(poisto_tiedosto.strip(), hk.DB_CONN)
+                st.success(f"{maara} pistettä, {viivoja} seinälinjaa ja {raportteja} raporttia poistettu "
+                           f"tiedostosta {poisto_tiedosto.strip()}.")
+
+    else:
+        st.warning("Tämä poistaa KAIKKIEN kiinteistöjen KAIKKI tallennetut mittaukset peruuttamattomasti.")
+        vahvistus3 = st.checkbox("Vahvistan: tyhjennä kaikki tallennetut mittaukset (pisteet, seinälinjat, "
+                                 "raportit ja asemapisteet)",
+                                 key="poisto_vahvistus_3")
+        if st.button("Tyhjennä koko taulu", key="poista_nappi_3"):
+            if not vahvistus3:
+                st.warning("Rastita vahvistus ennen tyhjennystä.")
+            else:
+                maara, viivoja, raportteja = jx.poista_kaikki_mittaukset(hk.DB_CONN)
+                st.success(f"Taulut tyhjennetty -- {maara} pistettä, {viivoja} seinälinjaa ja {raportteja} "
+                           "raporttia poistettu.")
 
 
 if time.time() - _AJON_ALKU > 3.0:
