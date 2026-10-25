@@ -45,11 +45,13 @@ def virheet(at):
 
 def test_kirjautuminen():
     at = sovellus(kirjautunut=False)
-    assert len(at.text_input) == 1 and not at.title
+    assert len(at.text_input) == 1 and not at.tabs
+    assert at.title[0].value == "Maastomittauksen apuri"
     at.text_input[0].set_value("väärä").run()
     assert any("Väärä salasana" in e.value for e in at.error)
     at.text_input[0].set_value(SALASANA).run()
-    assert at.title[0].value == "Kiintopisteiden, rajamerkkien ja rakennusten nurkkien haku"
+    assert [t.label for t in at.tabs] == ["Kiinteistöhaku", "Mittausten tuonti (JobXML)",
+                                          "Tallennetut mittausraportit", "Ylläpito"]
     assert not at.exception
 
 
@@ -188,6 +190,8 @@ def test_mittausten_tallennus_vie_seinalinjan(monkeypatch):
     monkeypatch.setattr(jx, "tallenna_seinalinjat_kantaan", viivat)
     raportti = mock.Mock(return_value=2)
     monkeypatch.setattr(jx, "tallenna_raportti_kantaan", raportti)
+    muut = mock.Mock(return_value=["091-9-9-9"])
+    monkeypatch.setattr(jx, "tiedoston_muut_kiinteistot", muut)
     tiedosto = _testi2(monkeypatch)
     at = sovellus()
     with ladattu_tiedosto("jobxml_tiedosto", tiedosto):
@@ -204,6 +208,23 @@ def test_mittausten_tallennus_vie_seinalinjan(monkeypatch):
     assert pdf.startswith(b"%PDF")
     assert any("10 pistettä" in s.value and "1 seinälinjaa seinalinjat-tauluun" in s.value
                and "2 asemapistettä" in s.value for s in at.success)
+    # sama tiedosto aiemmin toisella (esim. väärällä) tunnuksella: huomautus
+    assert muut.call_args[0][:2] == ("testi2.jxl", "09102509510003")
+    assert any("myös kiinteistölle 091-9-9-9" in w.value for w in at.warning)
+
+
+@pytest.mark.oikeat_aineistot
+def test_tallennusvirhe_naytetaan(monkeypatch):
+    import jobxml_tuonti as jx
+
+    monkeypatch.setattr(jx, "tallenna_mittaukset_kantaan", mock.Mock(side_effect=OSError("kanta ei vastaa")))
+    tiedosto = _testi2(monkeypatch)
+    at = sovellus()
+    with ladattu_tiedosto("jobxml_tiedosto", tiedosto):
+        at.run()
+        [b for b in at.button if b.label == "Tallenna mittaukset kantaan"][0].click().run()
+    assert not at.exception
+    assert any(e.value.startswith("Tallennus epäonnistui: kanta ei vastaa") for e in at.error)
 
 
 @pytest.mark.oikeat_aineistot
@@ -219,6 +240,7 @@ def test_seinalinjan_muokkaus_dxf_ja_tallennus(monkeypatch):
     for nimi in ("tallenna_mittaukset_kantaan", "tallenna_raportti_kantaan"):
         monkeypatch.setattr(jx, nimi, mock.Mock(return_value=1))
     monkeypatch.setattr(jx, "tallenna_seinalinjat_kantaan", viivat)
+    monkeypatch.setattr(jx, "tiedoston_muut_kiinteistot", mock.Mock(return_value=[]))
     tiedosto = _testi2(monkeypatch)
     at = sovellus()
     with ladattu_tiedosto("jobxml_tiedosto", tiedosto):
@@ -263,14 +285,12 @@ def test_tallennetut_raportit(monkeypatch):
     [b for b in at.button if b.key == "raportit_hae"][0].click().run()
     assert not virheet(at), virheet(at)
     assert haku.call_args[0][1] == "091-1-1-1"
-    assert pdf.call_args[0][:2] == ("091-1-1-1", "testi2.jxl")
     assert any(b.label == "Lataa mittausraportti (PDF, 1 kt)" for b in at.get("download_button"))
-    # lista haetaan uudelleen joka ajolla; poistettu raportti ei kaada sovellusta
-    pdf.return_value = None
+    # lista haetaan uudelleen joka ajolla, PDF vasta latausnapista (ei joka ajolla kannasta)
     at.run()
     assert haku.call_count >= 2
+    pdf.assert_not_called()
     assert not virheet(at), virheet(at)
-    assert any("ei löytynyt" in w.value for w in at.warning)
 
 
 @pytest.mark.oikeat_aineistot
@@ -424,12 +444,63 @@ def test_poisto_vain_poistosalasanalla(monkeypatch):
     at.session_state["_kirjautunut"] = True
     at.run()
     assert "poista_nappi_1" not in napit(at)
-    at.text_input(key="_poistosalasana_mittaukset").set_value("väärä").run()
+    at.text_input(key="_poistosalasana").set_value("väärä").run()
     assert any("Väärä poistosalasana" in e.value for e in at.error) and "poista_nappi_1" not in napit(at)
-    at.text_input(key="_poistosalasana_mittaukset").set_value("poisto123").run()
+    at.text_input(key="_poistosalasana").set_value("poisto123").run()
     assert "poista_nappi_1" in napit(at)
     at.text_input(key="poisto_tunnus").set_value("91-1-2-3").run()
     at.checkbox(key="poisto_vahvistus_1").check().run()
     at.button(key="poista_nappi_1").click().run()
     poista.assert_called_once()
     assert not virheet(at)
+    # omat kiintopisteet samasta poistovalikosta
+    poista_omat = mock.Mock(return_value=5)
+    monkeypatch.setattr(hk, "poista_omat_kiintopisteet", poista_omat)
+    at.radio(key="poisto_tapa").set_value("Omat (tiedostosta tuodut) kiintopisteet").run()
+    at.checkbox(key="oma_kp_poisto_vahvistus").check().run()
+    at.button(key="oma_kp_poista").click().run()
+    poista_omat.assert_called_once()
+    assert any("5 omaa kiintopistettä poistettu" in s.value for s in at.success)
+    assert not virheet(at)
+
+
+@pytest.mark.oikeat_aineistot
+def test_seinalinja_kerran_ja_valittu_jarjestys_myos_kokonaiskartassa(monkeypatch):
+    """Seinälinja muodostetaan kerran ajoa kohden, ja kokonaiskartta näyttää saman viivan kuin
+    Seinälinja-osio (myös valitulla järjestyksellä)."""
+    import jobxml_tuonti as jx
+
+    muodosta = mock.Mock(side_effect=jx.muodosta_seinalinja)
+    monkeypatch.setattr(jx, "muodosta_seinalinja", muodosta)
+    kartta = mock.Mock(side_effect=hk.luo_jobxml_interaktiivinen_kartta)
+    monkeypatch.setattr(hk, "luo_jobxml_interaktiivinen_kartta", kartta)
+    tiedosto = _testi2(monkeypatch)
+    at = sovellus()
+    with ladattu_tiedosto("jobxml_tiedosto", tiedosto):
+        at.run()
+        assert muodosta.call_count == 1 and muodosta.call_args.kwargs["tapa"] == "lyhin"
+        muodosta.reset_mock()
+        at.radio(key="seinalinja_tapa").set_value("Mittausjärjestys").run()
+    assert not virheet(at), virheet(at)
+    assert muodosta.call_count == 1 and muodosta.call_args.kwargs["tapa"] == "mittaus"
+    assert kartta.call_args[0][1]["viivat"]
+
+
+def test_verkkovirhe_lyhyesti_ilman_api_avainta(monkeypatch):
+    """requestsin virheteksti on pitkä ja sisältää kyselyn osoitteen API-avaimineen: käyttäjälle palvelu ja
+    syy lyhyesti, avain piiloon."""
+    import requests
+
+    url = "https://avoin-paikkatieto.maanmittauslaitos.fi/kiinteisto?api-key=testiavain&bbox=1"
+    sijainti = mock.Mock(side_effect=requests.ConnectTimeout(f"Max retries exceeded with url: {url}",
+                                                             request=requests.Request("GET", url).prepare()))
+    monkeypatch.setattr(hk, "hae_kiinteiston_sijainti", sijainti)
+    at = sovellus()
+    at.text_input[0].set_value("091-25-840-8")
+    at.button[0].click().run()
+    assert [e.value for e in at.error] == ["Haku epäonnistui: avoin-paikkatieto.maanmittauslaitos.fi ei vastannut "
+                                           "ajoissa"]
+    sijainti.side_effect = requests.HTTPError(f"401 Client Error: Unauthorized for url: {url}")
+    at.button[0].click().run()
+    assert [e.value for e in at.error] == ["Haku epäonnistui: 401 Client Error: Unauthorized for url: "
+                                           "https://avoin-paikkatieto.maanmittauslaitos.fi/kiinteisto?api-key=***&bbox=1"]

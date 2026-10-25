@@ -212,6 +212,8 @@ export default async function (component) {
     }
     L.control.layers(taustat, {}, { collapsed: true }).addTo(kartta);
     L.control.scale({ imperial: false }).addTo(kartta);
+    // Piilotettu välilehti tai suljettu osio muuttaa säiliön kokoa, jota Leaflet ei huomaa itse
+    new ResizeObserver(() => kartta.invalidateSize()).observe(div);
     const ryhma = L.layerGroup().addTo(kartta);
     tila = parentElement.__slm = { kartta, ryhma, rajattu: null };
     luoPiirto(L, tila);

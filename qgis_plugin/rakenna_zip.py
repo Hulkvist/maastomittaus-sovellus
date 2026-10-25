@@ -34,6 +34,7 @@ KARSITTAVAT = {
         "_tallennettavat_asemat", "mittausjarjestys", "tallenna_mittaukset_kantaan", "tallenna_seinalinjat_kantaan", "poista_mittaukset_kannasta", "poista_mittaukset_lahdetiedostolla",
         "poista_kaikki_mittaukset", "MITTAUSTAULUT", "_poista_mittaukset", "LAATULUOKAT", "_huonoin_asema",
         "_mm_tai_none", "MITTAUSTIETOSARAKKEET", "_mittaustiedot", "tallenna_raportti_kantaan", "_aseman_liitokset", "hae_raportit", "hae_raportin_pdf",
+        "tiedoston_muut_kiinteistot",
     ],
     "seinalinja.py": ["rajaa_viivaan", "_KOODIVARIT", "piirra_seinalinja_kartta", "dxf_taso", "kirjoita_dxf",
                       "lue_lidar_dxf"],

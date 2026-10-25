@@ -270,6 +270,10 @@ def test_mittausraportin_tallennus_haku_ja_poistot(db):
                     "AND kuvaus <> 'Asemapiste';", (ensimmainen[0],)) == [(ensimmainen[1] + 1,)]
     assert kysy(db, "SELECT bool_and(l.jarjestys > a.jarjestys) FROM asemien_liitokset l "
                     "JOIN asemapisteet a USING (kiinteistotunnus, lahdetiedosto, asema_nro);") == [(True,)]
+    # sama tiedosto toisella tunnuksella (esim. ensin väärä tunnus) löytyy tallennuksen huomautukseen
+    jx.tallenna_mittaukset_kantaan("091-1-1-2", jx.pisteet_tallennettavaksi(pisteet), db, raportti)
+    assert jx.tiedoston_muut_kiinteistot("testi2.jxl", "091-1-1-1", db) == ["091-1-1-2"]
+    assert jx.tiedoston_muut_kiinteistot("muu.jxl", "091-1-1-1", db) == []
     with hk.kanta(db) as cur:   # pisteet vain tätä tarkistusta varten; poistolaskurit alla ilman niitä
         cur.execute("TRUNCATE kentalla_mitatut_pisteet;")
     # uudelleentallennus korvaa saman kiinteistön ja tiedoston raportin ja asemat

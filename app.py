@@ -1,9 +1,9 @@
 """
 app.py -- Streamlit-käyttöliittymä
 ----------------------------------
-Kiintopiste- ja rajamerkkihaku (hae_kiintopisteet.py), JobXML-tuonti ja
--raportti (jobxml_tuonti.py), seinälinja (seinalinja.py) sekä tallennettujen
-mittausten poisto kannasta.
+Välilehdet: kiintopiste-, rajamerkki- ja nurkkahaku (hae_kiintopisteet.py), JobXML-tuonti,
+-raportti ja seinälinja (jobxml_tuonti.py, seinalinja.py), tallennetut mittausraportit sekä
+ylläpito (omien kiintopisteiden tuonti ja poistot kannasta).
 
 Käyttö:
     streamlit run app.py
@@ -12,41 +12,49 @@ Käyttö:
 import collections
 import copy
 import hashlib
+import hmac
 import math
 import os
+import re
 import tempfile
 import time
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
+
+OTSIKKO = "Maastomittauksen apuri"
+KUVAUS = ("Kiintopisteet, rajamerkit ja nurkat kiinteistölle · JobXML-mittausten raportti ja seinälinja · "
+          "tallennus kantaan")
+st.set_page_config(page_title=OTSIKKO, layout="wide")
+
 for _avain in ("MML_API_KEY", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER",
                "PGPASSWORD", "SOVELLUKSEN_SALASANA"):
     if _avain in st.secrets:
         os.environ[_avain] = str(st.secrets[_avain])
 
 
+def _sama_salasana(syotetty, oikea):
+    return bool(oikea) and hmac.compare_digest(str(syotetty or "").encode(), str(oikea).encode())
+
+
 # Yksinkertainen salasanasuoja koko sovellukselle
 def _tarkista_salasana():
-    def _salasana_syotetty():
-        if st.session_state.get("_syotetty_salasana") == st.secrets.get("SOVELLUKSEN_SALASANA"):
-            st.session_state["_kirjautunut"] = True
-            del st.session_state["_syotetty_salasana"]
-        else:
-            st.session_state["_kirjautunut"] = False
-
     if st.session_state.get("_kirjautunut", False):
         return True
+    oikea = st.secrets.get("SOVELLUKSEN_SALASANA")
 
-    st.text_input(
-        "Salasana",
-        type="password",
-        key="_syotetty_salasana",
-        on_change=_salasana_syotetty,
-    )
+    def _salasana_syotetty():
+        st.session_state["_kirjautunut"] = _sama_salasana(st.session_state.get("_syotetty_salasana"), oikea)
+        if st.session_state["_kirjautunut"]:
+            del st.session_state["_syotetty_salasana"]
 
+    st.title(OTSIKKO)
+    if not oikea:
+        st.error("Sovelluksen salasanaa (SOVELLUKSEN_SALASANA) ei ole asetettu sovelluksen salaisuuksiin.")
+        return False
+    st.text_input("Salasana", type="password", key="_syotetty_salasana", on_change=_salasana_syotetty)
     if st.session_state.get("_kirjautunut") is False:
         st.error("Väärä salasana, yritä uudelleen.")
-
     return False
 
 
@@ -54,12 +62,10 @@ if not _tarkista_salasana():
     st.stop()
 
 
-def _poisto_sallittu(avain):
+def _poisto_sallittu():
     """Poistot vain poistosalasanalla (secrets: POISTON_SALASANA), erillään sovelluksen salasanasta: muut
     sovelluksen käyttäjät eivät voi poistaa kannasta. Salasana kysytään kerran istunnossa. Ilman asetettua
     salasanaa poistot ovat pois käytöstä."""
-    import hmac
-
     oikea = st.secrets.get("POISTON_SALASANA")
     if not oikea:
         st.info("Poisto ei ole käytössä: poistosalasanaa (POISTON_SALASANA) ei ole asetettu sovelluksen "
@@ -67,10 +73,10 @@ def _poisto_sallittu(avain):
         return False
     if st.session_state.get("_poisto_auki"):
         return True
-    syotetty = st.text_input("Poistosalasana", type="password", key=f"_poistosalasana_{avain}",
+    syotetty = st.text_input("Poistosalasana", type="password", key="_poistosalasana",
                              help="Vain ylläpitäjä voi poistaa tietoja kannasta.")
     if syotetty:
-        if hmac.compare_digest(syotetty.encode(), str(oikea).encode()):
+        if _sama_salasana(syotetty, oikea):
             st.session_state["_poisto_auki"] = True
             return True
         st.error("Väärä poistosalasana.")
@@ -97,9 +103,40 @@ def _ajastettu(nimi, funktio, *args, **kwargs):
         if kesto > 1.0:
             print(f"Aika: {nimi} {kesto:.1f} s", flush=True)
 
-st.set_page_config(page_title="Kiintopisteiden, rajamerkkien ja rakennusten nurkkien haku", layout="wide")
+
+def _virheteksti(virhe):
+    """Virhe käyttäjälle: verkkovirheestä palvelu ja syy lyhyesti (requestsin oma teksti on pitkä ja
+    sisältää kyselyn osoitteen API-avaimineen), muista teksti ilman API-avainta."""
+    import requests
+    from urllib.parse import urlparse
+
+    if isinstance(virhe, (requests.ConnectionError, requests.Timeout)):
+        osoite = getattr(getattr(virhe, "request", None), "url", None)
+        palvelu = urlparse(osoite).hostname if osoite else "palvelu"
+        return (f"{palvelu} ei vastannut ajoissa" if isinstance(virhe, requests.Timeout)
+                else f"yhteys palveluun {palvelu} epäonnistui")
+    teksti = str(virhe)
+    if hk.MML_API_KEY:
+        teksti = teksti.replace(hk.MML_API_KEY, "***")
+    return re.sub(r"(api[-_]key=)[^&\s'\"]+", r"\1***", teksti)
+
+
+def _tiedostona(kirjoita, nimi):
+    """Tiedoston sisältö tavuina: kirjoita(polku) kirjoittaa sen väliaikaiseen hakemistoon, joka poistetaan
+    heti (palvelimen levy ei täyty ajo ajolta). kirjoita voi palauttaa toisen polun tai None (ei tiedostoa)."""
+    with tempfile.TemporaryDirectory() as hakemisto:
+        polku = os.path.join(hakemisto, nimi)
+        tulos = kirjoita(polku)
+        polku = tulos if isinstance(tulos, str) else polku
+        if not os.path.exists(polku):
+            return None
+        with open(polku, "rb") as f:
+            return f.read()
+
+
 st.image("kuvat/koirat_kuplat.jpg", width="stretch")  # alkuperäinen ilman kuplia: kuvat/koirat.jpg
-st.title("Kiintopisteiden, rajamerkkien ja rakennusten nurkkien haku")
+st.title(OTSIKKO)
+st.caption(KUVAUS)
 
 if not hk.MML_API_KEY:
     st.error(
@@ -109,91 +146,105 @@ if not hk.MML_API_KEY:
     )
     st.stop()
 
-with st.form("hakulomake"):
-    hakutapa = st.radio("Hakutapa", ["Kiinteistötunnus", "Osoite"], horizontal=True)
 
-    kiinteistotunnus_syote = None
-    osoite_syote = None
-    kaupunki_syote = None
+# ---------------------------------------------------------------------------
+# Kiinteistöhaku: kiintopisteet, rajamerkit, rajaviivat ja rakennusten nurkat
+# ---------------------------------------------------------------------------
+def _hakulomake():
+    """Hakulomake; palauttaa valinnat sanakirjana, kun Hae tiedot -nappia painettiin, muuten None."""
+    with st.form("hakulomake"):
+        hakutapa = st.radio("Hakutapa", ["Kiinteistötunnus", "Osoite"], horizontal=True)
 
-    if hakutapa == "Kiinteistötunnus":
-        kiinteistotunnus_syote = st.text_input(
-            "Kiinteistötunnus", placeholder="esim. 091-25-840-8 tai 834-434-1-158"
+        kiinteistotunnus_syote = None
+        osoite_syote = None
+        kaupunki_syote = None
+
+        if hakutapa == "Kiinteistötunnus":
+            kiinteistotunnus_syote = st.text_input(
+                "Kiinteistötunnus", placeholder="esim. 091-25-840-8 tai 834-434-1-158"
+            )
+        else:
+            col_o1, col_o2 = st.columns(2)
+            with col_o1:
+                osoite_syote = st.text_input("Katuosoite", placeholder="esim. Mannerheimintie 1")
+            with col_o2:
+                kaupunki_syote = st.text_input("Kaupunki", placeholder="esim. Helsinki")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            sade = st.number_input("Kiintopisteiden hakusäde (m)", min_value=10.0, max_value=20000.0,
+                                   value=1000.0, step=50.0)
+        with col2:
+            koordinaatisto = st.selectbox(
+                "Koordinaatisto (vaikuttaa sekä näytön taulukoihin että kiintopisteet.krd:hen)",
+                options=list(hk.COORDINATE_SYSTEMS.keys()),
+                index=0,
+                help="Kannan sisäinen tallennus (QGIS) on aina GK25/EPSG:3879 riippumatta tästä valinnasta.",
+            )
+
+        col5, col6, col7 = st.columns(3)
+        with col5:
+            nayta_rajat = st.checkbox("Näytä kiinteistön rajaviivat kartalla ja tallenna kantaan", value=True)
+        with col6:
+            sisallyta_varamerkit = st.checkbox("Sisällytä varamerkit", value=False)
+        with col7:
+            hae_rajamerkit = st.checkbox("Hae rajamerkit", value=True)
+
+        hae_nurkat = st.checkbox(
+            "Hae rakennusten nurkkapisteet (vain Helsinki)",
+            value=True,
+            help="Kiinteistön rakennusten nurkat Helsingin kantakartasta. Mukaan tulevat rakennukset, "
+                 "joiden pinta-alasta vähintään puolet on kiinteistöllä.",
         )
-    else:
-        col_o1, col_o2 = st.columns(2)
-        with col_o1:
-            osoite_syote = st.text_input("Katuosoite", placeholder="esim. Mannerheimintie 1")
-        with col_o2:
-            kaupunki_syote = st.text_input("Kaupunki", placeholder="esim. Helsinki")
-
-    sade = st.number_input("Kiintopisteiden hakusäde (m)", min_value=10.0, max_value=20000.0,
-                            value=1000.0, step=50.0)
-
-    col3, col4 = st.columns(2)
-    with col3:
-        koordinaatisto = st.selectbox(
-            "Koordinaatisto (vaikuttaa sekä näytön taulukoihin että kiintopisteet.krd:hen)",
-            options=list(hk.COORDINATE_SYSTEMS.keys()),
-            index=0,
-            help="Kannan sisäinen tallennus (QGIS) on aina GK25/EPSG:3879 riippumatta tästä valinnasta.",
+        hae_kiinteistotiedot = st.checkbox(
+            "Luo myös erillinen kiinteistotiedot.txt (kaikki avoimen rajapinnan tieto)",
+            value=False,
         )
-    with col4:
-        st.write("")
+        paivita_kiintopisteet = st.checkbox(
+            "Päivitä kiintopisteet MML:ltä",
+            value=False,
+            help="Kiintopisteet haetaan MML:ltä automaattisesti, jos kannassa ei ole niitä hakualueella. "
+                 "Tällä ne haetaan uudelleen, vaikka niitä olisi jo kannassa. Ei Helsingissä: siellä "
+                 "käytetään vain tuotuja kaupungin kiintopisteitä.",
+        )
 
-    col5, col6, col7 = st.columns(3)
-    with col5:
-        nayta_rajat = st.checkbox("Näytä kiinteistön rajaviivat kartalla ja tallenna kantaan", value=True)
-    with col6:
-        sisallyta_varamerkit = st.checkbox("Sisällytä varamerkit", value=False)
-    with col7:
-        hae_rajamerkit = st.checkbox("Hae rajamerkit", value=True)
+        if not st.form_submit_button("Hae tiedot", type="primary"):
+            return None
+    return {"hakutapa": hakutapa, "kiinteistotunnus": kiinteistotunnus_syote, "osoite": osoite_syote,
+            "kaupunki": kaupunki_syote, "sade": sade, "koordinaatisto": koordinaatisto,
+            "nayta_rajat": nayta_rajat, "sisallyta_varamerkit": sisallyta_varamerkit,
+            "hae_rajamerkit": hae_rajamerkit, "hae_nurkat": hae_nurkat,
+            "hae_kiinteistotiedot": hae_kiinteistotiedot, "paivita_kiintopisteet": paivita_kiintopisteet}
 
-    hae_nurkat = st.checkbox(
-        "Hae rakennusten nurkkapisteet (vain Helsinki)",
-        value=True,
-        help="Kiinteistön rakennusten nurkat Helsingin kantakartasta. Mukaan tulevat rakennukset, "
-             "joiden pinta-alasta vähintään puolet on kiinteistöllä.",
-    )
-    hae_kiinteistotiedot = st.checkbox(
-        "Luo myös erillinen kiinteistotiedot.txt (kaikki avoimen rajapinnan tieto)",
-        value=False,
-    )
-    paivita_kiintopisteet = st.checkbox(
-        "Päivitä kiintopisteet MML:ltä",
-        value=False,
-        help="Kiintopisteet haetaan MML:ltä automaattisesti, jos kannassa ei ole niitä hakualueella. "
-             "Tällä ne haetaan uudelleen, vaikka niitä olisi jo kannassa. Ei Helsingissä: siellä "
-             "käytetään vain tuotuja kaupungin kiintopisteitä.",
-    )
 
-    haettu = st.form_submit_button("Hae tiedot")
-
-if haettu:
-    st.session_state.pop("haku", None)
+def _hae_kiinteisto(valinnat):
+    """Haku MML:stä ja kannasta; tulokset session_stateen ("haku"), jotta ne pysyvät näkyvissä, kun
+    sivu ajetaan uudelleen (esim. PNG-napista tai tiedoston latauksesta)."""
+    sade, koordinaatisto = valinnat["sade"], valinnat["koordinaatisto"]
     kohde_epsg = hk.COORDINATE_SYSTEMS[koordinaatisto]
     desimaalit = 8 if kohde_epsg == 4326 else 3
 
     try:
-        if hakutapa == "Kiinteistötunnus":
-            if not kiinteistotunnus_syote or not kiinteistotunnus_syote.strip():
+        if valinnat["hakutapa"] == "Kiinteistötunnus":
+            tunnus = (valinnat["kiinteistotunnus"] or "").strip()
+            if not tunnus:
                 st.warning("Anna kiinteistötunnus ennen hakua.")
-                st.stop()
-            tunnus = kiinteistotunnus_syote.strip()
+                return
         else:
-            if not osoite_syote or not osoite_syote.strip():
+            osoite, kaupunki = (valinnat["osoite"] or "").strip(), (valinnat["kaupunki"] or "").strip()
+            if not osoite:
                 st.warning("Anna katuosoite ennen hakua.")
-                st.stop()
-            with st.spinner(f"Etsitään kiinteistötunnusta osoitteelle: {osoite_syote}, {kaupunki_syote or ''}..."):
+                return
+            with st.spinner(f"Etsitään kiinteistötunnusta osoitteelle: {osoite}, {kaupunki}..."):
                 tunnus, ehdokkaat, tasmasiko_kunta = hk.hae_kiinteistotunnus_osoitteella(
-                    osoite_syote.strip(), (kaupunki_syote or "").strip(), hk.MML_API_KEY
+                    osoite, kaupunki, hk.MML_API_KEY
                 )
             st.success(f"Osoite tunnistettu kiinteistöksi: **{tunnus}**")
 
-            if kaupunki_syote and kaupunki_syote.strip() and not tasmasiko_kunta:
+            if kaupunki and not tasmasiko_kunta:
                 st.warning(
                     f"Rajapinta ei löytänyt osumaa, joka olisi varmuudella kunnassa "
-                    f"'{kaupunki_syote.strip()}' -- tulos saattaa olla väärästä kunnasta. "
+                    f"'{kaupunki}' -- tulos saattaa olla väärästä kunnasta. "
                     f"Tarkista alta löydetyt ehdokkaat, ja jos tulos on väärä, kokeile "
                     f"hakea suoraan oikealla kiinteistötunnuksella."
                 )
@@ -241,26 +292,27 @@ if haettu:
                                f"Kasvata sädettä tai tarkista tuodun tiedoston koordinaatit.")
                 else:
                     st.warning("Helsingin kaupungin kiintopisteitä ei ole kannassa -- tuo ne "
-                               "kohdassa Tuo omat kiintopisteet (txt/krd).")
-        elif not tulokset_kaikki or paivita_kiintopisteet:
+                               "Ylläpito-välilehdellä (Tuo omat kiintopisteet).")
+        elif not tulokset_kaikki or valinnat["paivita_kiintopisteet"]:
             try:
                 with st.spinner("Haetaan kiintopisteitä MML:n tiedostopalvelusta (voi kestää noin minuutin)..."):
                     tuotu = hk.paivita_kiintopisteet_alueelle(coords, sade, hk.MML_API_KEY, hk.DB_CONN)
                 st.info(f"Kantaan tuotiin {tuotu} kiintopistettä MML:ltä.")
                 tulokset_kaikki = hk.hae_kiinteiston_kiintopisteet(tunnus, sade, hk.DB_CONN)
             except Exception as latausvirhe:
-                st.warning(f"Kiintopisteiden haku MML:ltä epäonnistui ({latausvirhe}) -- jatketaan ilman niitä.")
+                st.warning(f"Kiintopisteiden haku MML:ltä epäonnistui ({_virheteksti(latausvirhe)}) -- "
+                           "jatketaan ilman niitä.")
         with st.spinner("Tallennetaan hakutulokset..."):
-            tulokset = hk.suodata_paamerkit(tulokset_kaikki, sisallyta_varamerkit)
+            tulokset = hk.suodata_paamerkit(tulokset_kaikki, valinnat["sisallyta_varamerkit"])
             hk.tallenna_haku_tulokset(tunnus, tulokset, hk.DB_CONN)
         st.write(f"Löytyi **{len(tulokset)}** kiintopistettä {sade:.0f} m säteellä.")
 
         rajamerkit = []
-        if hae_rajamerkit:
+        if valinnat["hae_rajamerkit"]:
             with st.spinner("Haetaan rajamerkkejä..."):
                 rajamerkit = hk.hae_kiinteiston_rajamerkit(tunnus, hk.MML_API_KEY)
         hk.tallenna_rajamerkit_kantaan(tunnus, rajamerkit, hk.DB_CONN)
-        if hae_rajamerkit:
+        if valinnat["hae_rajamerkit"]:
             st.write(f"Löytyi **{len(rajamerkit)}** rajamerkkiä.")
             if len(rajamerkit) > 100:
                 st.warning(
@@ -270,6 +322,7 @@ if haettu:
                     "suoraan oikealla kiinteistötunnuksella."
                 )
 
+        nayta_rajat = valinnat["nayta_rajat"]
         rajaviivat = []
         if nayta_rajat:
             with st.spinner("Haetaan kiinteistön rajaviivoja..."):
@@ -279,7 +332,7 @@ if haettu:
             st.write(f"Löytyi **{len(rajaviivat)}** rajaviivaa.")
 
         rakennukset, nurkat = [], []
-        if hae_nurkat and hk.on_helsinki(tunnus):
+        if valinnat["hae_nurkat"] and hk.on_helsinki(tunnus):
             try:
                 with st.spinner("Haetaan rakennusten nurkkapisteitä Helsingin kantakartasta..."):
                     alue = hk.hae_kiinteiston_alue(tunnus, hk.MML_API_KEY)
@@ -287,28 +340,23 @@ if haettu:
                     nurkat = hk.rakennusten_nurkat(rakennukset)
                 st.write(f"Löytyi **{len(rakennukset)}** rakennusta, **{len(nurkat)}** nurkkapistettä.")
             except Exception as nurkkavirhe:
-                st.warning(f"Rakennusten nurkkapisteiden haku epäonnistui ({nurkkavirhe}) -- jatketaan ilman niitä.")
-        elif hae_nurkat:
+                st.warning(f"Rakennusten nurkkapisteiden haku epäonnistui ({_virheteksti(nurkkavirhe)}) -- "
+                           "jatketaan ilman niitä.")
+        elif valinnat["hae_nurkat"]:
             st.caption("Rakennusten nurkkapisteet ovat saatavilla vain Helsingistä (Helsingin kantakartta).")
 
-        tmp_dir = tempfile.mkdtemp()
-        krd_path = os.path.join(tmp_dir, "kiintopisteet.krd")
-        hk.kirjoita_yhdistetty_krd(tulokset, rajamerkit, krd_path, kohde_epsg=kohde_epsg, nurkat=nurkat,
-                                   desimaalit=desimaalit)
-        with open(krd_path, "rb") as f:
-            krd_sisalto = f.read()
+        krd_sisalto = _tiedostona(lambda polku: hk.kirjoita_yhdistetty_krd(
+            tulokset, rajamerkit, polku, kohde_epsg=kohde_epsg, nurkat=nurkat, desimaalit=desimaalit),
+            "kiintopisteet.krd")
 
         kiinteistotiedot = None
-        if hae_kiinteistotiedot:
-            kiinteistotiedot_path = os.path.join(tmp_dir, "kiinteistotiedot.txt")
+        if valinnat["hae_kiinteistotiedot"]:
             with st.spinner("Kootaan kiinteistötietoja avoimesta rajapinnasta..."):
-                hk.kirjoita_kiinteistotiedot_txt(tunnus, hk.MML_API_KEY, kiinteistotiedot_path)
-            with open(kiinteistotiedot_path, "rb") as f:
-                kiinteistotiedot = f.read()
+                kiinteistotiedot = _tiedostona(
+                    lambda polku: hk.kirjoita_kiinteistotiedot_txt(tunnus, hk.MML_API_KEY, polku),
+                    "kiinteistotiedot.txt")
 
         st.session_state["viimeisin_kiinteistotunnus"] = tunnus
-        # Tulokset talteen: kartta, taulukot ja latausnapit pysyvät näkyvissä, kun
-        # sivu ajetaan uudelleen (esim. PNG-napista tai tiedoston latauksesta).
         st.session_state["haku"] = {
             "tunnus": tunnus, "coords": coords, "tulokset": tulokset, "rajamerkit": rajamerkit,
             "rajaviivat": rajaviivat, "rakennukset": rakennukset, "nurkat": nurkat, "sade": sade,
@@ -317,14 +365,14 @@ if haettu:
         }
 
     except Exception as e:
-        st.error(f"Haku epäonnistui: {e}")
+        st.error(f"Haku epäonnistui: {_virheteksti(e)}")
 
 
-# ---------------------------------------------------------------------------
-# Viimeisimmän haun tulokset
-# ---------------------------------------------------------------------------
-haku = st.session_state.get("haku")
-if haku:
+def _hakutulokset():
+    """Viimeisimmän haun kartta, lataukset ja taulukot."""
+    haku = st.session_state.get("haku")
+    if not haku:
+        return
     tunnus, coords, tulokset = haku["tunnus"], haku["coords"], haku["tulokset"]
     rajamerkit, rajaviivat = haku["rajamerkit"], haku["rajaviivat"]
     rakennukset, nurkat, sade, nayta_rajat = haku["rakennukset"], haku["nurkat"], haku["sade"], haku["nayta_rajat"]
@@ -342,36 +390,34 @@ if haku:
         st_folium(hakukartta, height=650, use_container_width=True, returned_objects=[],
                   key="kiinteisto_kartta")
     except Exception as karttavirhe:
-        st.caption(f"Zoomattavaa karttaa ei voitu piirtää ({karttavirhe}).")
+        st.caption(f"Zoomattavaa karttaa ei voitu piirtää ({_virheteksti(karttavirhe)}).")
 
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         # PNG tehdään vain pyydettäessä: taustakartan tiilet haetaan joka kerta verkosta.
         if st.button("Luo kartta PNG-kuvana", key="hakukartta_png"):
-            png_path = os.path.join(tempfile.mkdtemp(), "kartta.png")
             try:
                 with st.spinner("Piirretään karttaa..."):
-                    hk.piirra_kartta(
-                        coords, tulokset, rajamerkit, png_path, hk.MML_API_KEY,
+                    haku["png"] = _tiedostona(lambda polku: hk.piirra_kartta(
+                        coords, tulokset, rajamerkit, polku, hk.MML_API_KEY,
                         sade_m=sade, nayta_kiinteistorajat=nayta_rajat,
                         kiinteistotunnus=tunnus, rajaviivat=rajaviivat, nurkat=nurkat,
-                    )
-                with open(png_path, "rb") as f:
-                    haku["png"] = f.read()
+                    ), "kartta.png")
             except Exception as karttavirhe:
-                st.error(f"PNG-karttaa ei voitu piirtää: {karttavirhe}")
+                st.error(f"PNG-karttaa ei voitu piirtää: {_virheteksti(karttavirhe)}")
         if haku["png"]:
-            st.download_button("Lataa kartta (PNG)", haku["png"], file_name="kartta.png", mime="image/png")
+            st.download_button("Lataa kartta (PNG)", haku["png"], file_name="kartta.png", mime="image/png",
+                               on_click="ignore")
     with col_b:
         st.download_button(
             f"Lataa kiintopisteet.krd ({koordinaatisto})", haku["krd"],
-            file_name="kiintopisteet.krd", mime="text/plain",
+            file_name="kiintopisteet.krd", mime="text/plain", on_click="ignore",
         )
     with col_c:
         if haku["kiinteistotiedot"]:
             st.download_button(
                 "Lataa kiinteistotiedot.txt", haku["kiinteistotiedot"],
-                file_name="kiinteistotiedot.txt", mime="text/plain",
+                file_name="kiinteistotiedot.txt", mime="text/plain", on_click="ignore",
             )
 
     if tulokset:
@@ -430,128 +476,27 @@ if haku:
             rivit.append({"Väli": vali, "Pituus (m)": round(hk.viivan_pituus(v), 2)})
         st.dataframe(rivit, width="stretch")
 
-    st.info(
-        "Tiedot on tallennettu PostGIS-kantaan (kiinteistot, rajamerkit, "
-        "haku_tulokset, kiinteistorajat -taulut) AINA GK25/EPSG:3879-muodossa "
-        "riippumatta yllä valitusta koordinaatistosta -- QGIS ei siis muutu "
-        "tämän valinnan mukaan. Avaa QGIS ja klikkaa jokaista tasoa hiiren "
-        "oikealla -> **Reload Layer** nähdäksesi uuden haun tulokset."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Omien kiintopisteiden tuonti tekstitiedostosta
-# ---------------------------------------------------------------------------
-with st.expander("Tuo omat kiintopisteet (txt/krd, ETRS-GK25)"):
     st.caption(
-        "Esim. Helsingin kaupungin omat kiintopisteet, joita ei ole avoimissa rajapinnoissa. "
-        "N- ja E-koordinaatit tunnistetaan suuruusluokasta, joten sarakkeiden järjestys ei haittaa. "
-        "Pistetunnus on ensimmäinen sarake (esim. 'nimi N E Z'), krd-muodossa "
-        "('1 0 koodi numero E N Z') koordinaatteja edeltävä numero. Korkeus on "
-        "koordinaattien jälkeinen luku. Pisteet tallennetaan kiintopisteiden joukkoon luokalla "
-        f"'{hk.OMA_KIINTOPISTE_LUOKKA}', ja haku löytää ne MML:n pisteiden rinnalta."
+        "Tiedot on tallennettu PostGIS-kantaan (kiinteistot, rajamerkit, haku_tulokset, kiinteistorajat "
+        "-taulut) aina GK25/EPSG:3879-muodossa riippumatta yllä valitusta koordinaatistosta -- QGIS ei siis "
+        "muutu tämän valinnan mukaan. Päivitä QGIS:n tasot hiiren oikealla -> **Reload Layer** nähdäksesi "
+        "uuden haun tulokset."
     )
-    oma_tiedosto = st.file_uploader("Kiintopisteet tekstitiedostona", type=["txt", "csv", "krd"],
-                                   key="oma_kp_tiedosto")
-    if oma_tiedosto is not None:
-        raaka = oma_tiedosto.getvalue()
-        try:
-            teksti = raaka.decode("utf-8")
-        except UnicodeDecodeError:
-            teksti = raaka.decode("latin-1")
-        omat_pisteet, ohitetut = hk.jasenna_kiintopiste_txt(teksti)
-        st.write(f"Tunnistettiin **{len(omat_pisteet)}** kiintopistettä, **{len(ohitetut)}** riviä ohitettiin.")
-        if omat_pisteet:
-            st.dataframe(
-                [{"Tunnus": p["tunnus"], "Koodi": p["koodi"], "N": p["n"], "E": p["e"], "Korkeus": p["korkeus"]}
-                 for p in omat_pisteet],
-                width="stretch", hide_index=True,
-            )
-            tunnukset = collections.Counter(p["tunnus"] for p in omat_pisteet)
-            kahdesti = [t for t, maara in tunnukset.items() if maara > 1]
-            if kahdesti:
-                st.info(f"{len(kahdesti)} tunnusta esiintyy useammin kuin kerran (esim. "
-                        f"{', '.join(kahdesti[:5])}). Kaikki pisteet tallennetaan -- haku tehdään sijainnin mukaan.")
-            ulkona = [p["tunnus"] for p in omat_pisteet if not hk.on_helsingin_alueella(p["e"], p["n"])]
-            if ulkona:
-                st.warning(f"{len(ulkona)} pistettä on Helsingin alueen ulkopuolella "
-                           f"(esim. {', '.join(ulkona[:5])}). Tarkista koordinaatisto.")
-        if ohitetut:
-            with st.expander("Ohitetut rivit (ei tunnistettu N- ja E-koordinaattia)"):
-                st.dataframe([{"Rivi": nro, "Sisältö": rivi} for nro, rivi in ohitetut],
-                             width="stretch", hide_index=True)
-        if omat_pisteet and st.button("Tallenna kiintopisteet kantaan", key="oma_kp_tallenna"):
-            try:
-                maara = hk.tallenna_omat_kiintopisteet(omat_pisteet, hk.DB_CONN)
-                st.success(f"{maara} kiintopistettä tallennettu kantaan.")
-            except Exception as e:
-                st.error(f"Tallennus epäonnistui: {e}")
 
-    st.markdown("---")
-    if _poisto_sallittu("omat_kp"):
-        vahvistus_omat = st.checkbox("Vahvistan: poista kaikki omat (tiedostosta tuodut) kiintopisteet kannasta",
-                                     key="oma_kp_poisto_vahvistus")
-        if st.button("Poista omat kiintopisteet", key="oma_kp_poista"):
-            if not vahvistus_omat:
-                st.warning("Rastita vahvistus ennen poistoa.")
-            else:
-                maara = hk.poista_omat_kiintopisteet(hk.DB_CONN)
-                st.success(f"{maara} omaa kiintopistettä poistettu. MML:n kiintopisteet jäivät ennalleen.")
+
+def _kiinteistohaku():
+    valinnat = _hakulomake()
+    if valinnat:
+        st.session_state.pop("haku", None)
+        _hae_kiinteisto(valinnat)
+    _hakutulokset()
 
 
 # ---------------------------------------------------------------------------
-# JobXML-tiedoston tuonti + raportti
+# Mittausten tuonti (JobXML): raportti, seinälinja ja tallennus
 # ---------------------------------------------------------------------------
-st.divider()
-st.header("Tuo omat mittaukset (JobXML)")
-st.caption(
-    "Raahaa JobXML (.jxl/.xml) -tiedosto tähän. Ohjelma lukee "
-    "koko työn, näyttää kattavan raportin (työaika, asemapisteiden luotettavuus, "
-    "MML:n 2x-säännön ylitykset, hylätyt pisteet) ja voit tallentaa mitatut pisteet "
-    "kantaan."
-)
+SEINALINJAN_JARJESTYS = {"Automaattinen": "lyhin", "Mittausjärjestys": "mittaus", "Lyhin reitti (vanha)": "lyhin_vanha"}
 
-# HUOM: tiedoston lataus ja jäsennys tehdään ENSIN, jotta kiinteistötunnus
-# voidaan ehdottaa automaattisesti mitattujen pisteiden sijainnin perusteella
-# ennen kuin käyttäjä valitsee/kirjoittaa tunnuksen.
-ladattu_tiedosto = st.file_uploader("Raahaa tai valitse JobXML-tiedosto (.jxl / .xml)", type=["jxl", "xml"],
-                                     key="jobxml_tiedosto")
-
-raportti, kaikki_pisteet, hylatyt = None, [], []
-ehdotettu_tunnus, ehdotuksen_osumat, ehdotuksen_pisteita_mukana = None, {}, 0
-ehdotuksen_virhe = None
-
-if ladattu_tiedosto is not None:
-    raaka_bytes = ladattu_tiedosto.getvalue()
-
-    try:
-        raportti, kaikki_pisteet, hylatyt = _ajastettu("JobXML:n jäsennys", jx.jasenna_tyo, raaka_bytes,
-                                                      lahdetiedosto=ladattu_tiedosto.name)
-    except Exception as e:
-        st.error(f"Tiedoston jäsennys epäonnistui: {e}")
-        raportti, kaikki_pisteet, hylatyt = None, [], []
-
-    if raportti:
-        ehdotus_avain = f"kiinteisto_ehdotus_{ladattu_tiedosto.name}_{ladattu_tiedosto.size}"
-        if ehdotus_avain not in st.session_state:
-            try:
-                with st.spinner("Tunnistetaan kiinteistöä automaattisesti mitatuista pisteistä..."):
-                    tulos = _ajastettu("kiinteistön tunnistus (MML)", hk.tunnista_kiinteisto_pisteparvesta,
-                                    kaikki_pisteet, hk.MML_API_KEY)
-                st.session_state[ehdotus_avain] = (tulos[0], tulos[1], tulos[2], None)
-                # Ehdotus kirjoitetaan suoraan tekstikentän session_state-avaimeen
-                # ennen kuin widget luodaan alempana (text_input:in value= toimii vain
-                # widgetin ensimmäisellä luonnilla). Vain tälle tiedostolle ensimmäisen
-                # kerran, jottei käyttäjän oma muokkaus ylikirjoitu.
-                edellinen_arvo = st.session_state.get("jobxml_tunnus", "")
-                edellinen_auto_arvo = st.session_state.get("_jobxml_tunnus_auto", "")
-                if tulos[0] and edellinen_arvo == edellinen_auto_arvo:
-                    st.session_state["jobxml_tunnus"] = tulos[0]
-                    st.session_state["_jobxml_tunnus_auto"] = tulos[0]
-            except Exception as e:
-                st.session_state[ehdotus_avain] = (None, {}, 0, str(e))
-        (ehdotettu_tunnus, ehdotuksen_osumat,
-         ehdotuksen_pisteita_mukana, ehdotuksen_virhe) = st.session_state[ehdotus_avain]
 
 def _seinalinjan_kantakartta(pisteet):
     """Helsingin kantakartan rakennukset seinälinjan pisteiden ympäriltä (5 m marginaali).
@@ -570,7 +515,7 @@ def _seinalinjan_kantakartta(pisteet):
             valimuisti[bbox] = hk.rakennusten_renkaat(
                 _ajastettu("kantakartan rakennukset (kartta.hel.fi)", hk.hae_helsinki_rakennukset, bbox))
         except Exception as e:
-            return None, str(e), True   # epäonnistunutta hakua ei jätetä muistiin
+            return None, _virheteksti(e), True   # epäonnistunutta hakua ei jätetä muistiin
     return valimuisti[bbox] or None, None, True
 
 
@@ -580,6 +525,57 @@ def _seinalinjan_muokkaukset(raaka_bytes):
     (seinalinja.sovella_muokkaukset)."""
     avain = "_sl_muokkaukset_" + hashlib.sha1(raaka_bytes).hexdigest()
     return st.session_state.setdefault(avain, {"pohja": None, "muokkaukset": []})
+
+
+def _seinalinjan_lidar():
+    """Seinälinja-osioon ladatun LiDAR-seinien DXF:n (lidarpipen _seinat.dxf) janat:
+    ({"SEINA": [...], "EPAVARMA": [...]} tai None, virheteksti tai None). Luetaan
+    session_statesta, koska kokonaiskartta piirretään ennen osiota; tulos pidetään istunnossa."""
+    ladattu = st.session_state.get("seinalinja_lidar")
+    if ladattu is None:
+        return None, None
+    sisalto = ladattu.getvalue()
+    avain = hashlib.sha1(sisalto).hexdigest()
+    valimuisti = st.session_state.setdefault("_lidar_valimuisti", {})
+    if avain not in valimuisti:
+        try:
+            with tempfile.TemporaryDirectory() as hakemisto:
+                polku = os.path.join(hakemisto, "lidar_seinat.dxf")
+                with open(polku, "wb") as f:
+                    f.write(sisalto)
+                janat = sl.lue_lidar_dxf(polku)
+        except Exception as e:
+            return None, f"LiDAR-seinien DXF:ää ei voitu lukea ({_virheteksti(e)})"
+        valimuisti.clear()
+        valimuisti[avain] = (janat, None)
+    return valimuisti[avain]
+
+
+def _seinalinjan_valmistelu(kaikki_pisteet, raaka_bytes):
+    """Seinälinja kerran ajoa kohden sekä kokonaiskarttaan että Seinälinja-osioon, jotta viivat ovat samat.
+    Osion valinnat (järjestys, kantakartta, LiDAR-DXF) luetaan session_statesta, koska kokonaiskartta
+    piirretään ennen osiota. Käsin tehdyt muokkaukset tulevat automaattisen viivan päälle; kun muokkauksia
+    on, automaattinen viiva on lukittu: uudelleenlaskenta (järjestys, kantakartta, LiDAR) ei muuta sitä."""
+    s = {"tulos": None, "tila": None, "muuttui": False, "virhe": None}
+    kantakartta, s["kantakartta_virhe"], s["helsingissa"] = _seinalinjan_kantakartta(kaikki_pisteet)
+    s["kantakartta"] = kantakartta if st.session_state.get("seinalinja_kantakartta", True) else None
+    s["lidar"], s["lidar_virhe"] = _seinalinjan_lidar()
+    s["lidar_seinat"] = s["lidar"]["SEINA"] if s["lidar"] and s["lidar"]["SEINA"] else None
+    s["lidar_paatelty"] = s["lidar"].get("PAATELTY") if s["lidar"] else None   # vain järjestyksen apuna
+    try:
+        tulos = jx.muodosta_seinalinja(
+            kaikki_pisteet, tapa=SEINALINJAN_JARJESTYS.get(st.session_state.get("seinalinja_tapa"), "lyhin"),
+            kantakartta=s["kantakartta"], lidar=s["lidar_seinat"], lidar_paatelty=s["lidar_paatelty"],
+        )
+        s["tila"] = tila = _seinalinjan_muokkaukset(raaka_bytes)
+        pohja = sl.viivojen_tunniste(tulos)
+        if not tila["muokkaukset"] or not tila.get("pohja_tulos"):
+            tila.update(pohja=pohja, pohja_tulos=copy.deepcopy(tulos), muokkaukset=[])
+        s["muuttui"] = tila["pohja"] != pohja
+        s["tulos"] = sl.sovella_muokkaukset(tila["pohja_tulos"], tila["muokkaukset"])
+    except Exception as e:
+        s["virhe"] = e
+    return s
 
 
 def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
@@ -738,104 +734,386 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
             st.warning(str(e))
 
 
-def _seinalinjan_lidar():
-    """Seinälinja-osioon ladatun LiDAR-seinien DXF:n (lidarpipen _seinat.dxf) janat:
-    ({"SEINA": [...], "EPAVARMA": [...]} tai None, virheteksti tai None). Luetaan
-    session_statesta, koska kokonaiskartta piirretään ennen osiota; tulos pidetään istunnossa."""
-    ladattu = st.session_state.get("seinalinja_lidar")
-    if ladattu is None:
-        return None, None
-    sisalto = ladattu.getvalue()
-    avain = hashlib.sha1(sisalto).hexdigest()
-    valimuisti = st.session_state.setdefault("_lidar_valimuisti", {})
-    if avain not in valimuisti:
-        polku = os.path.join(tempfile.mkdtemp(), "lidar_seinat.dxf")
-        with open(polku, "wb") as f:
-            f.write(sisalto)
+def _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi):
+    """Seinälinja-osion sisältö valintojen alla: huomiot, kartta tai muokkauskartta, PNG, taulukko ja DXF.
+    Palauttaa tallennettavan (tulos, poikkeamat LiDARista)."""
+    sl_tulos, kantakartta, lidar, lidar_seinat = s["tulos"], s["kantakartta"], s["lidar"], s["lidar_seinat"]
+    if s["muuttui"]:
+        st.info("Automaattinen seinälinja olisi muuttunut (järjestys, kantakartta tai LiDAR). Käsin "
+                "tehdyt muokkaukset pidetään ennallaan; Palauta automaattinen viiva ottaa uuden "
+                "laskennan käyttöön.")
+    if kantakartta:
+        riskit = sl.kantakartan_riskit(kantakartta, kaikki_pisteet)
+        if riskit:
+            st.info("**Kantakartan talossa huomioitavaa:**\n\n" + "\n".join(f"- {r}" for r in riskit))
+    for varoitus in sl_tulos["varoitukset"]:
+        st.warning(varoitus)
+    if kantakartta:
+        poikkeama = sl.poikkeama_kantakartasta(sl_tulos, kantakartta)
+        if poikkeama:
+            st.caption(f"Seinälinja poikkeaa kantakartasta keskimäärin "
+                       f"{poikkeama['keskiarvo_m'] * 100:.0f} cm, enimmillään "
+                       f"{poikkeama['suurin_m'] * 100:.0f} cm.")
+    poikkeamat_lidar = sl.poikkeamat_lidarista(sl_tulos, lidar_seinat) if lidar_seinat else []
+    if lidar:
+        suljettu = bool(lidar_seinat and sl.lidar_aariviivat(lidar_seinat, s["lidar_paatelty"]))
+        st.caption(f"LiDAR: {len(lidar['SEINA'])} seinää, {len(lidar['EPAVARMA'])} epävarmaa. "
+                   + ("Seinistä syntyi suljettu ääriviiva (järjestyksen apuna)." if suljettu else
+                      "Suljettua ääriviivaa ei syntynyt, joten järjestystä ei oteta LiDARista; "
+                      "piilokulmat ja vertailu toimivat silti."))
+        for p in poikkeamat_lidar:
+            st.caption(f"{p['nimi']}: LiDAR-seinät eivät kata viivaa." if p["keskiarvo_m"] is None else
+                       f"{p['nimi']}: poikkeaa LiDAR-seinistä keskimäärin {p['keskiarvo_m'] * 100:.1f} cm, "
+                       f"enimmillään {p['suurin_m'] * 100:.1f} cm (LiDAR kattaa {p['peitto'] * 100:.0f} % "
+                       "viivasta).")
+
+    nimet = [v["nimi"] for v in sl_tulos["viivat"]]
+    valittu = None
+    if len(nimet) > 1:
+        valinta = st.radio("Rajaa kartta", ["Kaikki viivat"] + nimet, horizontal=True, key="seinalinja_rajaus")
+        if valinta != "Kaikki viivat":
+            valittu = valinta
+    if st.toggle("Muokkaa viivaa kartalla", key="seinalinja_muokkaa",
+                 help="Kärkien raahaus, napsautus mitattuun pisteeseen, uusi kärki, poisto ja "
+                      "suorakulmainen mittaus. Muokattu viiva menee taulukkoon, DXF:ään, PNG:hen ja "
+                      "kantaan."):
+        _seinalinjan_muokkaus(sl_tulos, s["tila"], kaikki_pisteet, valittu, s["helsingissa"])
+    else:
         try:
-            valimuisti.clear()
-            valimuisti[avain] = (sl.lue_lidar_dxf(polku), None)
+            sl_kartta = hk.luo_seinalinja_interaktiivinen_kartta(sl_tulos, api_key=hk.MML_API_KEY,
+                                                                  viiva=valittu, lidar=lidar,
+                                                                  poikkeamat_lidar=poikkeamat_lidar)
+            if sl_kartta is not None:
+                st.caption("Zoomaa hiirellä tai +/- napeista. Pisteestä saa koordinaatit klikkaamalla.")
+                # returned_objects=[] -> zoomaus ei aja sovellusta uudelleen; avain rajauksen
+                # mukaan, jotta kartta rajataan uudelleen valinnan vaihtuessa
+                st_folium(sl_kartta, height=650, use_container_width=True, returned_objects=[],
+                          key=f"seinalinja_kartta_{valittu}")
+        except Exception as karttavirhe:
+            st.caption(f"Zoomattavaa seinälinjakarttaa ei voitu piirtää ({_virheteksti(karttavirhe)}).")
+
+    nimen_loppu = "" if valittu is None else "_" + valittu.replace(" ", "_")
+    # PNG tehdään vain pyydettäessä, koska taustakuva haetaan WMS:stä joka kerta.
+    if st.button("Luo seinälinja PNG-kuvana", key="seinalinja_png"):
+        png_tulos = sl_tulos if valittu is None else sl.rajaa_viivaan(sl_tulos, valittu)
+        try:
+            with st.spinner("Piirretään seinälinjaa..."):
+                kuva = _tiedostona(lambda polku: sl.piirra_seinalinja_kartta(
+                    png_tulos, polku,
+                    hae_tausta=lambda bbox: hk.hae_helsinki_kantakartta(bbox, leveys_px=1000, korkeus_px=1000),
+                ), "seinalinja.png")
+            st.download_button("Lataa seinälinjakuva (PNG)", kuva, file_name=f"seinalinja_{job_nimi}{nimen_loppu}.png",
+                               mime="image/png", on_click="ignore")
+        except Exception as karttavirhe:
+            st.error(f"Seinälinjan PNG-kuvaa ei voitu piirtää: {_virheteksti(karttavirhe)}")
+
+    st.dataframe(
+        [{"Viiva": viiva["nimi"], "Nimi": k["nimi"], "Laji": k["laji"],
+          "E": round(k["e"], 3), "N": round(k["n"], 3),
+          "Korkeus": round(k["z"], 3) if k["z"] is not None else None}
+         for viiva in sl_tulos["viivat"] for k in viiva["karjet"]],
+        width="stretch",
+    )
+
+    muokattu = sl_tulos.get("muokattu")
+    # DXF kirjoitetaan vasta napin painalluksella (ei joka ajolla)
+    st.download_button("Lataa seinälinja (DXF)" + (" (muokattu)" if muokattu else ""),
+                       lambda: _tiedostona(lambda polku: sl.kirjoita_dxf(sl_tulos, polku), "seinalinja.dxf"),
+                       file_name=f"seinalinja_{job_nimi}{'_muokattu' if muokattu else ''}.dxf",
+                       mime="application/dxf", on_click="ignore")
+    return sl_tulos, poikkeamat_lidar
+
+
+def _seinalinja_osio(s, kaikki_pisteet, job_nimi):
+    """Seinälinja-osio (_seinalinjan_valmistelu). Palauttaa tallennettavan (tulos, poikkeamat LiDARista)
+    tai None, jos seinälinjaa ei saatu muodostettua."""
+    with st.expander("Seinälinja (koodit 8 / 5 / 100)", expanded=True):
+        st.caption(
+            "8 = viivan alku/loppu, 5 = talon kulma, 100 = piste seinälinjalla (ei kulma). "
+            "Yksi 8-piste = suljettu talo, kaksi tai useampi = avoin viiva 8-pisteiden kautta. "
+            "Piilossa olevat kulmat lasketaan 100-pisteiden linjojen leikkauksena. "
+            "Useampi talo samaan tiedostoon: viivan numero koodin perään (8 2, 5 2, 100 2); "
+            "ilman numeroa viiva 1. Kohdekoodin kanssa tyyppi tulee kohdekoodin perään (RAK 8, RAK 5, "
+            "RAK 100, RAK 8 2). Eri kohdekoodit (RAK, KATOS) ja rakennetyypit (esim. Sokkeli) ovat eri "
+            "viivoja ilman numeroa; pelkkä RAK on tavallinen piste."
+        )
+        st.radio("Pisteiden järjestys 8-pisteiden välillä", list(SEINALINJAN_JARJESTYS), horizontal=True,
+                 key="seinalinja_tapa")
+        if s["helsingissa"]:
+            st.checkbox("Käytä kantakarttaa apuna", value=True, key="seinalinja_kantakartta",
+                        help="Automaattisessa järjestyksessä: jos järjestystä ei voi päätellä seinälinjoista, "
+                             "se otetaan Helsingin kantakartan talosta, ja poikkeamasta kartan taloon varoitetaan.")
+            if s["kantakartta_virhe"]:
+                st.caption(f"Kantakartan rakennuksia ei saatu ({s['kantakartta_virhe']}) -- jatketaan ilman niitä.")
+        st.file_uploader(
+            "LiDAR-seinät (kokeilu): keilauksen _seinat.dxf", type=["dxf"], key="seinalinja_lidar",
+            help="Lidar-repon lidarpipen seinälinja-DXF (SEINA-taso). Piilokulman seinän suunta otetaan "
+                 "LiDAR-seinästä suoran kulman oletuksen sijaan, suljetusta LiDAR-ääriviivasta saadaan "
+                 "järjestys, ja poikkeama LiDARista näkyy kartalla.")
+        if s["lidar_virhe"]:
+            st.error(s["lidar_virhe"])
+        try:
+            if s["virhe"] is not None:
+                raise s["virhe"]
+            return _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi)
+        except Exception as sl_virhe:
+            st.error(f"Seinälinjan muodostus epäonnistui: {_virheteksti(sl_virhe)}")
+            return None
+
+
+def _mittauksen_yhteenveto(raportti):
+    """Tärkeimmät luvut yhdellä rivillä; yksityiskohdat ovat alla osioissa."""
+    huonoin = ((jx._huonoin_asema(raportti["asemapisteet"]) or {}).get("laatu") or {}).get("luokka")
+    tyoaika = raportti.get("tyoaika_yhteensa_s")
+    sarakkeet = st.columns(6)
+    sarakkeet[0].metric("Mitattuja pisteitä", sum(raportti["maara"].values()))
+    sarakkeet[1].metric("Hylättyjä", raportti["hylatyt_maara"], help="Lasketut pisteet, joita ei tallenneta.")
+    sarakkeet[2].metric("Asemia", len(raportti["asemapisteet"]))
+    sarakkeet[3].metric("Huonoin asema", huonoin or "-")
+    sarakkeet[4].metric("Työaika", jx._muotoile_kesto(tyoaika) if tyoaika else "-")
+    sarakkeet[5].metric("2x-säännön ylityksiä", len(raportti["varoitukset_2x"]))
+
+
+def _asemapisteet(asemapisteet):
+    for a in asemapisteet:
+        st.markdown(f"**{a['nimi']}**")
+        col1, col2, col3, col_kartta = st.columns([1, 1, 1, 1.2])
+        with col1:
+            se_n = a.get("se_n_m")
+            se_e = a.get("se_e_m")
+            st.write(f"Trimble SE-N: {se_n:.4f} m" if se_n is not None else "Trimble SE-N: -")
+            st.write(f"Trimble SE-E: {se_e:.4f} m" if se_e is not None else "Trimble SE-E: -")
+            if se_n and se_n > jx.SUURI_SE_VAROITUSRAJA_M:
+                st.warning("Poikkeuksellisen suuri keskivirhe (N)")
+            if se_e and se_e > jx.SUURI_SE_VAROITUSRAJA_M:
+                st.warning("Poikkeuksellisen suuri keskivirhe (E)")
+        with col2:
+            liitospisteet = a.get("liitospisteet", [])
+            kojeasento_liitospisteet = set(a.get("kojeasento_liitospisteet", []))
+            st.write(f"Liitospisteitä: {len(liitospisteet)}")
+            if kojeasento_liitospisteet:
+                liitos_nayttolista = [
+                    f"{x} 📐" if x in kojeasento_liitospisteet else str(x)
+                    for x in liitospisteet
+                ]
+                st.write(f"({', '.join(liitos_nayttolista)})")
+                st.caption(f"📐 = mitattu kahdesta kojeasennosta ({len(kojeasento_liitospisteet)} kpl)")
+            else:
+                st.write(f"({', '.join(str(x) for x in liitospisteet)})")
+            korkeusliitokset = a.get("korkeusliitokset", [])
+            if korkeusliitokset:
+                st.caption(f"Korkeusliitokset (vain korkeus): {', '.join(str(x) for x in korkeusliitokset)}")
+            kulmavirheet = a.get("kulmavirheet", [])
+            if kulmavirheet:
+                st.caption("Kulmavirhe:")
+                for kv in kulmavirheet:
+                    # JobXML:n kulmat ovat asteina (avaimen nimestä huolimatta)
+                    st.caption(f"  {kv['liitospiste']}: {kv['kulmavirhe_rad']:.6f}° ({kv['kulmavirhe_rad']*3600:.2f}″)")
+        with col3:
+            sijainti = a.get("sijainti")
+            if sijainti:
+                st.write(f"Sijaintiluokka: **{sijainti['S']}**")
+                st.write(sijainti["luokka"])
+                st.caption(
+                    f"Etäisyys reunasta: {sijainti['etaisyys_m']} m "
+                    f"(+ = sisällä, - = ulkona), keskisivu {sijainti['keskisivu_m']} m"
+                )
+            else:
+                st.write("Sijaintiluokitus ei laskettavissa (alle 3 liitospistettä)")
+        laatu = a.get("laatu")
+
+        if laatu:
+            st.markdown("---")
+            st.write(f"Asemapisteen kokonaislaatu: {laatu.get('kokonaispiste')} / 100")
+            st.write(f"Laatuluokka: {laatu.get('luokka')}")
+            st.caption(
+                f"Liitospisteitä: {laatu.get('liitospisteita')} | "
+                f"PDOP-keskiarvo: {laatu.get('pdop_keskiarvo')} | "
+                f"Huonoin PDOP: {laatu.get('pdop_huonoimmillaan')} | "
+                f"Kulmapeitto: {laatu.get('kulmapeitto_deg')}°"
+            )
+            st.caption(
+                f"RMS-vaakaresiduaali: {laatu.get('rms_residuaali_m')} m | "
+                f"Suurin vaakaresiduaali: {laatu.get('suurin_residuaali_m')} m"
+            )
+            for varoitus in laatu.get("varoitukset") or []:
+                st.warning(varoitus)
+        with col_kartta:
+            try:
+                kuva = _tiedostona(lambda polku: _ajastettu(f"asemapistekartta {a['nimi']}",
+                                                            jx.piirra_asemapiste_kartta, a, polku), "asema.png")
+                if kuva:
+                    st.image(kuva, caption="tähti = asema, sininen = liitospiste, harmaa = korkeuspiste")
+                else:
+                    st.caption("Karttaa ei voitu piirtää (koordinaatit puuttuvat).")
+            except Exception as karttavirhe:
+                st.caption(f"Karttaa ei voitu piirtää: {_virheteksti(karttavirhe)}")
+        if a.get("residuaalit"):
+            st.caption("Residuaalit per liitospiste:")
+            st.dataframe(
+                [{"Liitospiste": r["liitospiste"], "ΔN (m)": r["delta_n"], "ΔE (m)": r["delta_e"],
+                  "ΔHz (m)": (math.hypot(r["delta_n"], r["delta_e"])
+                              if r["delta_n"] is not None and r["delta_e"] is not None else None)}
+                 for r in a["residuaalit"]],
+                width="stretch",
+            )
+        st.markdown("---")
+
+
+def _tallenna_mittaukset(tunnus, osoite, kaupunki, ladattu_tiedosto, raportti, kaikki_pisteet, hylatyt, pdf_bytes,
+                         sl_tallennettava):
+    """Pisteet, seinälinja, raportti ja asemat kantaan. osoite (ja kaupunki) annetaan, kun kiinteistö
+    haetaan osoitteella; muuten tunnus."""
+    try:
+        if osoite is not None:
+            if not osoite.strip():
+                st.warning("Anna katuosoite ennen tallennusta.")
+                return
+            with st.spinner("Etsitään kiinteistötunnusta osoitteelle..."):
+                tunnus, _, _ = hk.hae_kiinteistotunnus_osoitteella(osoite.strip(), (kaupunki or "").strip(),
+                                                                   hk.MML_API_KEY)
+            st.success(f"Osoite tunnistettu kiinteistöksi: **{tunnus}**")
+        tunnus = (tunnus or "").strip()
+        if not tunnus:
+            st.warning("Anna kiinteistötunnus ennen tallennusta.")
+            return
+        with st.spinner("Tallennetaan..."):
+            tallennettavat = jx.pisteet_tallennettavaksi(kaikki_pisteet)
+            maara = jx.tallenna_mittaukset_kantaan(tunnus, tallennettavat, hk.DB_CONN, raportti)
+            viivoja = (jx.tallenna_seinalinjat_kantaan(tunnus, sl_tallennettava[0], ladattu_tiedosto.name,
+                                                       hk.DB_CONN, sl_tallennettava[1])
+                       if sl_tallennettava else 0)
+            asemia = jx.tallenna_raportti_kantaan(tunnus, raportti, kaikki_pisteet, hylatyt, pdf_bytes, hk.DB_CONN)
+        st.success(
+            f"{maara} pistettä tallennettu kentalla_mitatut_pisteet-tauluun "
+            f"({len(kaikki_pisteet) - len(tallennettavat)} liitospisteen RTK-alkuperäismittausta "
+            "jätettiin pois tuplapisteiden välttämiseksi)"
+            + (f", {viivoja} seinälinjaa seinalinjat-tauluun" if viivoja else "")
+            + f", mittausraportti{'' if pdf_bytes else ' (ilman PDF:ää)'} mittausraportit-tauluun"
+            + f" ja {asemia} asemapistettä asemapisteet-tauluun."
+        )
+    except Exception as e:
+        st.error(f"Tallennus epäonnistui: {_virheteksti(e)}. Tallenna uudelleen: saman kiinteistön ja tiedoston "
+                 "rivit korvataan, joten keskeneräinen tallennus ei jää kantaan tuplana.")
+        return
+    try:
+        muut = jx.tiedoston_muut_kiinteistot(raportti.get("lahdetiedosto"), tunnus, hk.DB_CONN)
+    except Exception:
+        muut = []   # vain huomautus: tallennus onnistui jo
+    if muut:
+        st.warning(f"Sama tiedosto on tallennettu kantaan myös kiinteistölle {', '.join(muut)}. Jos se oli väärä "
+                   f"tunnus, poista Ylläpito-välilehdellä tiedoston {raportti.get('lahdetiedosto')} mittaukset ja "
+                   "tallenna sitten uudelleen.")
+
+
+def _mittausten_tuonti():
+    st.caption(
+        "Raahaa JobXML (.jxl/.xml) -tiedosto tähän. Ohjelma lukee "
+        "koko työn, näyttää raportin (työaika, asemapisteiden luotettavuus, "
+        "MML:n 2x-säännön ylitykset, hylätyt pisteet) ja seinälinjan, ja voit tallentaa mitatut pisteet "
+        "kantaan sivun lopussa."
+    )
+
+    # HUOM: tiedoston lataus ja jäsennys tehdään ENSIN, jotta kiinteistötunnus
+    # voidaan ehdottaa automaattisesti mitattujen pisteiden sijainnin perusteella
+    # ennen kuin käyttäjä valitsee/kirjoittaa tunnuksen.
+    ladattu_tiedosto = st.file_uploader("Raahaa tai valitse JobXML-tiedosto (.jxl / .xml)", type=["jxl", "xml"],
+                                        key="jobxml_tiedosto")
+
+    raportti, kaikki_pisteet, hylatyt = None, [], []
+    ehdotettu_tunnus, ehdotuksen_osumat, ehdotuksen_pisteita_mukana = None, {}, 0
+    ehdotuksen_virhe = None
+
+    if ladattu_tiedosto is not None:
+        raaka_bytes = ladattu_tiedosto.getvalue()
+
+        try:
+            raportti, kaikki_pisteet, hylatyt = _ajastettu("JobXML:n jäsennys", jx.jasenna_tyo, raaka_bytes,
+                                                          lahdetiedosto=ladattu_tiedosto.name)
         except Exception as e:
-            return None, f"LiDAR-seinien DXF:ää ei voitu lukea ({e})"
-    return valimuisti[avain]
+            st.error(f"Tiedoston jäsennys epäonnistui: {e}")
+            raportti, kaikki_pisteet, hylatyt = None, [], []
 
+        if raportti:
+            ehdotus_avain = f"kiinteisto_ehdotus_{ladattu_tiedosto.name}_{ladattu_tiedosto.size}"
+            if ehdotus_avain not in st.session_state:
+                try:
+                    with st.spinner("Tunnistetaan kiinteistöä automaattisesti mitatuista pisteistä..."):
+                        tulos = _ajastettu("kiinteistön tunnistus (MML)", hk.tunnista_kiinteisto_pisteparvesta,
+                                           kaikki_pisteet, hk.MML_API_KEY)
+                    st.session_state[ehdotus_avain] = (tulos[0], tulos[1], tulos[2], None)
+                    # Ehdotus kirjoitetaan suoraan tekstikentän session_state-avaimeen
+                    # ennen kuin widget luodaan alempana (text_input:in value= toimii vain
+                    # widgetin ensimmäisellä luonnilla). Vain tälle tiedostolle ensimmäisen
+                    # kerran, jottei käyttäjän oma muokkaus ylikirjoitu.
+                    edellinen_arvo = st.session_state.get("jobxml_tunnus", "")
+                    edellinen_auto_arvo = st.session_state.get("_jobxml_tunnus_auto", "")
+                    if tulos[0] and edellinen_arvo == edellinen_auto_arvo:
+                        st.session_state["jobxml_tunnus"] = tulos[0]
+                        st.session_state["_jobxml_tunnus_auto"] = tulos[0]
+                except Exception as e:
+                    st.session_state[ehdotus_avain] = (None, {}, 0, _virheteksti(e))
+            (ehdotettu_tunnus, ehdotuksen_osumat,
+             ehdotuksen_pisteita_mukana, ehdotuksen_virhe) = st.session_state[ehdotus_avain]
 
-jobxml_hakutapa = st.radio(
-    "Kiinteistön tunnistustapa mittauksille", ["Kiinteistötunnus", "Osoite"],
-    horizontal=True, key="jobxml_hakutapa",
-)
-
-if jobxml_hakutapa == "Kiinteistötunnus":
-    # HUOM: EI value=-parametria -- arvo tulee session_statesta (asetettu
-    # yllä juuri ennen tätä, jos ehdotus löytyi, tai käyttäjän omasta
-    # aiemmasta kirjoituksesta). Jos kumpaakaan ei ole, kenttä on tyhjä.
-    if "jobxml_tunnus" not in st.session_state:
-        st.session_state["jobxml_tunnus"] = st.session_state.get("viimeisin_kiinteistotunnus", "")
-    jobxml_tunnus_syote = st.text_input(
-        "Kiinteistötunnus, johon mittaukset liittyvät",
-        key="jobxml_tunnus",
-    )
-    if ladattu_tiedosto is not None and raportti:
-        if ehdotettu_tunnus:
-            osuma_maara = ehdotuksen_osumat.get(ehdotettu_tunnus, 0)
-            st.caption(
-                f"🔎 Ehdotettu automaattisesti mitattujen pisteiden sijainnin perusteella "
-                f"({osuma_maara}/{ehdotuksen_pisteita_mukana} kartoitus-/merkintäpistettä osui "
-                f"tälle kiinteistölle) -- tarkista ja korjaa tarvittaessa."
-            )
-        elif ehdotuksen_virhe:
-            st.warning(f"⚠️ Automaattinen kiinteistön tunnistus epäonnistui: {ehdotuksen_virhe}")
-        elif ehdotuksen_pisteita_mukana == 0:
-            st.caption(
-                "ℹ️ Automaattista ehdotusta ei voitu laskea -- tiedostossa ei ollut yhtään "
-                "Kartoituspiste/Merkintäpiste/Suunnittelupiste-kategorian pistettä (vain "
-                "asema-, liitos- tai korkeuspisteitä), tai kaikki pisteet olivat samoja."
-            )
-        else:
-            st.caption(
-                f"ℹ️ Automaattinen tunnistus tarkisti {ehdotuksen_pisteita_mukana} pistettä, "
-                "mutta yksikään ei osunut minkään kiinteistön sisään MML:n rajapinnan mukaan "
-                "-- anna kiinteistötunnus itse."
-            )
-    jobxml_osoite_syote = None
-    jobxml_kaupunki_syote = None
-else:
-    col_jo1, col_jo2 = st.columns(2)
-    with col_jo1:
-        jobxml_osoite_syote = st.text_input("Katuosoite", key="jobxml_osoite", placeholder="esim. Mannerheimintie 1")
-    with col_jo2:
-        jobxml_kaupunki_syote = st.text_input("Kaupunki", key="jobxml_kaupunki", placeholder="esim. Helsinki")
-    jobxml_tunnus_syote = None
-
-if ladattu_tiedosto is not None and raportti:
-    st.success(
-        f"**{raportti['job_nimi']}** jäsennetty -- "
-        f"{sum(raportti['maara'].values())} mitattua pistettä, {raportti['hylatyt_maara']} hylättyä (lasketut pisteet)."
+    jobxml_hakutapa = st.radio(
+        "Kiinteistön tunnistustapa mittauksille", ["Kiinteistötunnus", "Osoite"],
+        horizontal=True, key="jobxml_hakutapa",
     )
 
-    with st.expander("Tiedoston perustiedot", expanded=True):
-        st.write(f"**Koodikirjasto:** {raportti.get('koodikirjasto', '-')}")
+    jobxml_tunnus_syote = jobxml_osoite_syote = jobxml_kaupunki_syote = None
+    if jobxml_hakutapa == "Kiinteistötunnus":
+        # HUOM: EI value=-parametria -- arvo tulee session_statesta (asetettu
+        # yllä juuri ennen tätä, jos ehdotus löytyi, tai käyttäjän omasta
+        # aiemmasta kirjoituksesta). Jos kumpaakaan ei ole, kenttä on tyhjä.
+        if "jobxml_tunnus" not in st.session_state:
+            st.session_state["jobxml_tunnus"] = st.session_state.get("viimeisin_kiinteistotunnus", "")
+        jobxml_tunnus_syote = st.text_input(
+            "Kiinteistötunnus, johon mittaukset liittyvät",
+            key="jobxml_tunnus",
+        )
+        if ladattu_tiedosto is not None and raportti:
+            if ehdotettu_tunnus:
+                osuma_maara = ehdotuksen_osumat.get(ehdotettu_tunnus, 0)
+                st.caption(
+                    f"🔎 Ehdotettu automaattisesti mitattujen pisteiden sijainnin perusteella "
+                    f"({osuma_maara}/{ehdotuksen_pisteita_mukana} kartoitus-/merkintäpistettä osui "
+                    f"tälle kiinteistölle) -- tarkista ja korjaa tarvittaessa."
+                )
+            elif ehdotuksen_virhe:
+                st.warning(f"⚠️ Automaattinen kiinteistön tunnistus epäonnistui: {ehdotuksen_virhe}")
+            elif ehdotuksen_pisteita_mukana == 0:
+                st.caption(
+                    "ℹ️ Automaattista ehdotusta ei voitu laskea -- tiedostossa ei ollut yhtään "
+                    "Kartoituspiste/Merkintäpiste/Suunnittelupiste-kategorian pistettä (vain "
+                    "asema-, liitos- tai korkeuspisteitä), tai kaikki pisteet olivat samoja."
+                )
+            else:
+                st.caption(
+                    f"ℹ️ Automaattinen tunnistus tarkisti {ehdotuksen_pisteita_mukana} pistettä, "
+                    "mutta yksikään ei osunut minkään kiinteistön sisään MML:n rajapinnan mukaan "
+                    "-- anna kiinteistötunnus itse."
+                )
+    else:
+        col_jo1, col_jo2 = st.columns(2)
+        with col_jo1:
+            jobxml_osoite_syote = st.text_input("Katuosoite", key="jobxml_osoite", placeholder="esim. Mannerheimintie 1")
+        with col_jo2:
+            jobxml_kaupunki_syote = st.text_input("Kaupunki", key="jobxml_kaupunki", placeholder="esim. Helsinki")
 
-    # Helsingin kantakartan rakennukset seinälinjan apuna (järjestys, tarkistus, riskit)
-    sl_kantakartta, sl_kantakartta_virhe, sl_helsingissa = None, None, False
-    if raportti.get("seinalinja_kaytettavissa"):
-        sl_kantakartta, sl_kantakartta_virhe, sl_helsingissa = _seinalinjan_kantakartta(kaikki_pisteet)
-    kaytetty_kantakartta = sl_kantakartta if st.session_state.get("seinalinja_kantakartta", True) else None
-    # LiDAR-seinät (Seinälinja-osion latauskenttä) myös kokonaiskartan seinälinjaan, jotta viivat ovat samat
-    sl_lidar, sl_lidar_virhe = _seinalinjan_lidar() if raportti.get("seinalinja_kaytettavissa") else (None, None)
-    sl_lidar_seinat = sl_lidar["SEINA"] if sl_lidar and sl_lidar["SEINA"] else None
-    sl_lidar_paatelty = sl_lidar.get("PAATELTY") if sl_lidar else None   # vain järjestyksen apuna
+    if ladattu_tiedosto is None or not raportti:
+        return
+    job_nimi = raportti["job_nimi"]
+
+    st.success(f"**{job_nimi}** jäsennetty. Koodikirjasto: {raportti.get('koodikirjasto') or '-'}")
+    _mittauksen_yhteenveto(raportti)
+
+    # Seinälinja kerran: sama viiva kokonaiskarttaan, Seinälinja-osioon ja kantaan
+    seina = _seinalinjan_valmistelu(kaikki_pisteet, raaka_bytes) if raportti.get("seinalinja_kaytettavissa") else None
 
     with st.expander("Kokonaiskartta (kaikki pisteet)", expanded=True):
         try:
-            kartan_seinalinja = (jx.muodosta_seinalinja(kaikki_pisteet, kantakartta=kaytetty_kantakartta,
-                                                        lidar=sl_lidar_seinat, lidar_paatelty=sl_lidar_paatelty)
-                                 if raportti.get("seinalinja_kaytettavissa") else None)
-            if kartan_seinalinja:
-                kk_tila = _seinalinjan_muokkaukset(raaka_bytes)
-                if kk_tila["muokkaukset"] and kk_tila.get("pohja_tulos"):   # sama lukittu pohja kuin osiossa
-                    kartan_seinalinja = sl.sovella_muokkaukset(kk_tila["pohja_tulos"], kk_tila["muokkaukset"])
-            kartta = hk.luo_jobxml_interaktiivinen_kartta(kaikki_pisteet, kartan_seinalinja,
+            kartta = hk.luo_jobxml_interaktiivinen_kartta(kaikki_pisteet, seina["tulos"] if seina else None,
                                                           api_key=hk.MML_API_KEY)
             if kartta is not None:
                 st.caption("Zoomaa hiirellä tai +/- napeista. Taustakartan ja tasot voi vaihtaa oikeasta yläkulmasta.")
@@ -845,150 +1123,24 @@ if ladattu_tiedosto is not None and raportti:
             else:
                 st.caption("Karttaa ei voitu piirtää (koordinaatit puuttuvat kaikilta pisteiltä).")
         except Exception as karttavirhe:
-            st.caption(f"Kokonaiskarttaa ei voitu piirtää: {karttavirhe}")
+            st.caption(f"Kokonaiskarttaa ei voitu piirtää: {_virheteksti(karttavirhe)}")
 
         # PNG tehdään vain pyydettäessä, koska taustakuva haetaan WMS:stä joka kerta.
         if st.button("Luo kokonaiskartta PNG-kuvana"):
             try:
-                yk_path = os.path.join(tempfile.mkdtemp(), "yleiskartta.png")
-                tulos_polku = jx.piirra_yleiskartta(kaikki_pisteet, yk_path)
-                if tulos_polku and os.path.exists(tulos_polku):
-                    with open(tulos_polku, "rb") as f:
-                        st.download_button("Lataa kokonaiskartta (PNG)", f,
-                                           file_name=f"yleiskartta_{raportti['job_nimi']}.png",
-                                           mime="image/png")
+                with st.spinner("Piirretään karttaa..."):
+                    kuva = _tiedostona(lambda polku: jx.piirra_yleiskartta(kaikki_pisteet, polku), "yleiskartta.png")
+                if kuva:
+                    st.download_button("Lataa kokonaiskartta (PNG)", kuva, file_name=f"yleiskartta_{job_nimi}.png",
+                                       mime="image/png", on_click="ignore")
+                else:
+                    st.caption("Karttaa ei voitu piirtää (koordinaatit puuttuvat kaikilta pisteiltä).")
             except Exception as karttavirhe:
-                st.caption(f"PNG-karttaa ei voitu piirtää: {karttavirhe}")
+                st.caption(f"PNG-karttaa ei voitu piirtää: {_virheteksti(karttavirhe)}")
 
     # Seinälinja näytetään vain, jos tiedostossa on vähintään yksi 8-koodin piste.
     # Näkyvä seinälinja (ja poikkeama LiDARista) tallennetaan kantaan pisteiden kanssa.
-    sl_tallennettava = None
-    if raportti.get("seinalinja_kaytettavissa"):
-        with st.expander("Seinälinja (koodit 8 / 5 / 100)", expanded=True):
-            st.caption(
-                "8 = viivan alku/loppu, 5 = talon kulma, 100 = piste seinälinjalla (ei kulma). "
-                "Yksi 8-piste = suljettu talo, kaksi tai useampi = avoin viiva 8-pisteiden kautta. "
-                "Piilossa olevat kulmat lasketaan 100-pisteiden linjojen leikkauksena. "
-                "Useampi talo samaan tiedostoon: viivan numero koodin perään (8 2, 5 2, 100 2); "
-                "ilman numeroa viiva 1. Kohdekoodin kanssa tyyppi tulee kohdekoodin perään (RAK 8, RAK 5, "
-                "RAK 100, RAK 8 2). Eri kohdekoodit (RAK, KATOS) ja rakennetyypit (esim. Sokkeli) ovat eri "
-                "viivoja ilman numeroa; pelkkä RAK on tavallinen piste."
-            )
-            seinalinja_tapa = st.radio(
-                "Pisteiden järjestys 8-pisteiden välillä", ["Automaattinen", "Mittausjärjestys", "Lyhin reitti (vanha)"],
-                horizontal=True, key="seinalinja_tapa",
-            )
-            if sl_helsingissa:
-                st.checkbox("Käytä kantakarttaa apuna", value=True, key="seinalinja_kantakartta",
-                            help="Automaattisessa järjestyksessä: jos järjestystä ei voi päätellä seinälinjoista, "
-                                 "se otetaan Helsingin kantakartan talosta, ja poikkeamasta kartan taloon varoitetaan.")
-                if sl_kantakartta_virhe:
-                    st.caption(f"Kantakartan rakennuksia ei saatu ({sl_kantakartta_virhe}) -- jatketaan ilman niitä.")
-            st.file_uploader(
-                "LiDAR-seinät (kokeilu): keilauksen _seinat.dxf", type=["dxf"], key="seinalinja_lidar",
-                help="Lidar-repon lidarpipen seinälinja-DXF (SEINA-taso). Piilokulman seinän suunta otetaan "
-                     "LiDAR-seinästä suoran kulman oletuksen sijaan, suljetusta LiDAR-ääriviivasta saadaan "
-                     "järjestys, ja poikkeama LiDARista näkyy kartalla.")
-            if sl_lidar_virhe:
-                st.error(sl_lidar_virhe)
-            try:
-                sl_tulos = jx.muodosta_seinalinja(
-                    kaikki_pisteet, tapa={"Automaattinen": "lyhin", "Mittausjärjestys": "mittaus"}.get(seinalinja_tapa, "lyhin_vanha"),
-                    kantakartta=kaytetty_kantakartta, lidar=sl_lidar_seinat, lidar_paatelty=sl_lidar_paatelty,
-                )
-                # Käsin tehdyt muokkaukset (muokkauskartta) automaattisen viivan päälle. Kun muokkauksia on,
-                # automaattinen viiva on lukittu: uudelleenlaskenta (järjestys, kantakartta, LiDAR) ei muuta sitä
-                sl_tila = _seinalinjan_muokkaukset(raaka_bytes)
-                sl_pohja = sl.viivojen_tunniste(sl_tulos)
-                if not sl_tila["muokkaukset"] or not sl_tila.get("pohja_tulos"):
-                    sl_tila.update(pohja=sl_pohja, pohja_tulos=copy.deepcopy(sl_tulos), muokkaukset=[])
-                elif sl_tila["pohja"] != sl_pohja:
-                    st.info("Automaattinen seinälinja olisi muuttunut (järjestys, kantakartta tai LiDAR). Käsin "
-                            "tehdyt muokkaukset pidetään ennallaan; Palauta automaattinen viiva ottaa uuden "
-                            "laskennan käyttöön.")
-                sl_tulos = sl.sovella_muokkaukset(sl_tila["pohja_tulos"], sl_tila["muokkaukset"])
-                if kaytetty_kantakartta:
-                    riskit = sl.kantakartan_riskit(kaytetty_kantakartta, kaikki_pisteet)
-                    if riskit:
-                        st.info("**Kantakartan talossa huomioitavaa:**\n\n" + "\n".join(f"- {r}" for r in riskit))
-                for varoitus in sl_tulos["varoitukset"]:
-                    st.warning(varoitus)
-                if kaytetty_kantakartta:
-                    poikkeama = sl.poikkeama_kantakartasta(sl_tulos, kaytetty_kantakartta)
-                    if poikkeama:
-                        st.caption(f"Seinälinja poikkeaa kantakartasta keskimäärin "
-                                   f"{poikkeama['keskiarvo_m'] * 100:.0f} cm, enimmillään "
-                                   f"{poikkeama['suurin_m'] * 100:.0f} cm.")
-                sl_poikkeamat_lidar = sl.poikkeamat_lidarista(sl_tulos, sl_lidar_seinat) if sl_lidar_seinat else []
-                sl_tallennettava = (sl_tulos, sl_poikkeamat_lidar)
-                if sl_lidar:
-                    suljettu = bool(sl_lidar_seinat and sl.lidar_aariviivat(sl_lidar_seinat, sl_lidar_paatelty))
-                    st.caption(f"LiDAR: {len(sl_lidar['SEINA'])} seinää, {len(sl_lidar['EPAVARMA'])} epävarmaa. "
-                               + ("Seinistä syntyi suljettu ääriviiva (järjestyksen apuna)." if suljettu else
-                                  "Suljettua ääriviivaa ei syntynyt, joten järjestystä ei oteta LiDARista; "
-                                  "piilokulmat ja vertailu toimivat silti."))
-                    for p in sl_poikkeamat_lidar:
-                        st.caption(f"{p['nimi']}: LiDAR-seinät eivät kata viivaa." if p["keskiarvo_m"] is None else
-                                   f"{p['nimi']}: poikkeaa LiDAR-seinistä keskimäärin {p['keskiarvo_m'] * 100:.1f} cm, "
-                                   f"enimmillään {p['suurin_m'] * 100:.1f} cm (LiDAR kattaa {p['peitto'] * 100:.0f} % "
-                                   "viivasta).")
-
-                tmp_sl_dir = tempfile.mkdtemp()
-                sl_nimet = [v["nimi"] for v in sl_tulos["viivat"]]
-                sl_valittu = None
-                if len(sl_nimet) > 1:
-                    sl_valinta = st.radio("Rajaa kartta", ["Kaikki viivat"] + sl_nimet,
-                                          horizontal=True, key="seinalinja_rajaus")
-                    if sl_valinta != "Kaikki viivat":
-                        sl_valittu = sl_valinta
-                if st.toggle("Muokkaa viivaa kartalla", key="seinalinja_muokkaa",
-                             help="Kärkien raahaus, napsautus mitattuun pisteeseen, uusi kärki, poisto ja "
-                                  "suorakulmainen mittaus. Muokattu viiva menee taulukkoon, DXF:ään, PNG:hen ja "
-                                  "kantaan."):
-                    _seinalinjan_muokkaus(sl_tulos, sl_tila, kaikki_pisteet, sl_valittu, sl_helsingissa)
-                else:
-                    try:
-                        sl_kartta = hk.luo_seinalinja_interaktiivinen_kartta(sl_tulos, api_key=hk.MML_API_KEY,
-                                                                              viiva=sl_valittu, lidar=sl_lidar,
-                                                                              poikkeamat_lidar=sl_poikkeamat_lidar)
-                        if sl_kartta is not None:
-                            st.caption("Zoomaa hiirellä tai +/- napeista. Pisteestä saa koordinaatit klikkaamalla.")
-                            # returned_objects=[] -> zoomaus ei aja sovellusta uudelleen; avain rajauksen
-                            # mukaan, jotta kartta rajataan uudelleen valinnan vaihtuessa
-                            st_folium(sl_kartta, height=650, use_container_width=True, returned_objects=[],
-                                      key=f"seinalinja_kartta_{sl_valittu}")
-                    except Exception as karttavirhe:
-                        st.caption(f"Zoomattavaa seinälinjakarttaa ei voitu piirtää ({karttavirhe}).")
-
-                # PNG tehdään vain pyydettäessä, koska taustakuva haetaan WMS:stä joka kerta.
-                if st.button("Luo seinälinja PNG-kuvana", key="seinalinja_png"):
-                    sl_png_tulos = sl_tulos if sl_valittu is None else sl.rajaa_viivaan(sl_tulos, sl_valittu)
-                    sl_kuva = sl.piirra_seinalinja_kartta(
-                        sl_png_tulos, os.path.join(tmp_sl_dir, "seinalinja.png"),
-                        hae_tausta=lambda bbox: hk.hae_helsinki_kantakartta(bbox, leveys_px=1000, korkeus_px=1000),
-                    )
-                    with open(sl_kuva, "rb") as f:
-                        st.download_button("Lataa seinälinjakuva (PNG)", f,
-                                           file_name=f"seinalinja_{raportti['job_nimi']}"
-                                                     f"{'' if sl_valittu is None else '_' + sl_valittu.replace(' ', '_')}.png",
-                                           mime="image/png")
-
-                st.dataframe(
-                    [{"Viiva": viiva["nimi"], "Nimi": k["nimi"], "Laji": k["laji"],
-                      "E": round(k["e"], 3), "N": round(k["n"], 3),
-                      "Korkeus": round(k["z"], 3) if k["z"] is not None else None}
-                     for viiva in sl_tulos["viivat"] for k in viiva["karjet"]],
-                    width="stretch",
-                )
-
-                sl_dxf = sl.kirjoita_dxf(sl_tulos, os.path.join(tmp_sl_dir, "seinalinja.dxf"))
-                with open(sl_dxf, "rb") as f:
-                    st.download_button("Lataa seinälinja (DXF)" + (" (muokattu)" if sl_tulos.get("muokattu") else ""), f,
-                                       file_name=f"seinalinja_{raportti['job_nimi']}"
-                                                 f"{'_muokattu' if sl_tulos.get('muokattu') else ''}.dxf",
-                                       mime="application/dxf")
-            except Exception as sl_virhe:
-                st.error(f"Seinälinjan muodostus epäonnistui: {sl_virhe}")
+    sl_tallennettava = _seinalinja_osio(seina, kaikki_pisteet, job_nimi) if seina else None
 
     with st.expander("Lataukset", expanded=True):
         # PDF tehdään kerran tiedostoa kohden: asemien kartat haetaan WMS:stä
@@ -1001,12 +1153,12 @@ if ladattu_tiedosto is not None and raportti:
                     pdf_valimuisti[pdf_avain] = (_ajastettu("mittausraportti (PDF)", mr.tee_pdf, raportti, kaikki_pisteet,
                                                            hylatyt), None)
                 except Exception as pdf_virhe:
-                    pdf_valimuisti[pdf_avain] = (None, str(pdf_virhe))
+                    pdf_valimuisti[pdf_avain] = (None, _virheteksti(pdf_virhe))
         pdf_bytes, pdf_virhe = pdf_valimuisti[pdf_avain]
         if pdf_bytes:
             st.download_button("Lataa mittausraportti (PDF)", pdf_bytes,
-                               file_name=f"mittausraportti_{raportti['job_nimi']}.pdf", mime="application/pdf",
-                               key="pdf_lataus")
+                               file_name=f"mittausraportti_{job_nimi}.pdf", mime="application/pdf",
+                               key="pdf_lataus", on_click="ignore")
         else:
             st.error(f"Mittausraportin teko epäonnistui: {pdf_virhe}")
 
@@ -1044,9 +1196,18 @@ if ladattu_tiedosto is not None and raportti:
         for varoitus in krd_varoitukset:
             st.caption(varoitus)
         st.download_button(f"Lataa pisteet (krd, {len(krd_rivit)} pistettä)", jx.kirjoita_krd(krd_rivit),
-                           file_name=f"{raportti['job_nimi']}.krd", mime="text/plain", key="krd_lataus")
+                           file_name=f"{job_nimi}.krd", mime="text/plain", key="krd_lataus", on_click="ignore")
 
-    with st.expander("Aika työmaalla (ensimmäisen ja viimeisen mitatun pisteen välinen aika)", expanded=True):
+    if raportti["asemapisteet"]:
+        with st.expander(f"Asemapisteet ({len(raportti['asemapisteet'])} kpl)", expanded=True):
+            _asemapisteet(raportti["asemapisteet"])
+
+    if raportti["varoitukset_2x"]:
+        with st.expander(f"⚠️ MML:n 2x-säännön ylitykset ({len(raportti['varoitukset_2x'])} kpl)", expanded=True):
+            st.dataframe(raportti["varoitukset_2x"], width="stretch")
+
+    lyhyet = [j for j in raportti["tyojaksot"] if j["kesto_s"] < jx.PIENI_TYOJAKSO_VAROITUSRAJA_S]
+    with st.expander("Aika työmaalla (ensimmäisen ja viimeisen mitatun pisteen välinen aika)", expanded=bool(lyhyet)):
         if raportti["tyojaksot"]:
             rivit = []
             for j in raportti["tyojaksot"]:
@@ -1063,7 +1224,7 @@ if ladattu_tiedosto is not None and raportti:
         else:
             st.warning("Ei validia mittausdataa työajan laskemiseksi.")
 
-    with st.expander("Pisteiden yhteenveto", expanded=True):
+    with st.expander("Pisteiden yhteenveto"):
         rivit = [{"Kategoria": k, "Lukumäärä": v} for k, v in raportti["maara"].items()]
         rivit.append({"Kategoria": "Hylätyt (lasketut pisteet)", "Lukumäärä": raportti["hylatyt_maara"]})
         st.dataframe(rivit, width="stretch")
@@ -1081,111 +1242,6 @@ if ladattu_tiedosto is not None and raportti:
                 "tarkempi kuin yhden kojeasennon mittaus."
             )
 
-    if raportti["asemapisteet"]:
-        with st.expander(f"Asemapisteet ({len(raportti['asemapisteet'])} kpl)", expanded=True):
-            for a in raportti["asemapisteet"]:
-                st.markdown(f"**{a['nimi']}**")
-                col1, col2, col3, col_kartta = st.columns([1, 1, 1, 1.2])
-                with col1:
-                    se_n = a.get("se_n_m")
-                    se_e = a.get("se_e_m")
-                    st.write(f"Trimble SE-N: {se_n:.4f} m" if se_n is not None else "Trimble SE-N: -")
-                    st.write(f"Trimble SE-E: {se_e:.4f} m" if se_e is not None else "Trimble SE-E: -")
-                    if se_n and se_n > jx.SUURI_SE_VAROITUSRAJA_M:
-                        st.warning("Poikkeuksellisen suuri keskivirhe (N)")
-                    if se_e and se_e > jx.SUURI_SE_VAROITUSRAJA_M:
-                        st.warning("Poikkeuksellisen suuri keskivirhe (E)")
-                with col2:
-                    liitospisteet = a.get("liitospisteet", [])
-                    kojeasento_liitospisteet = set(a.get("kojeasento_liitospisteet", []))
-                    st.write(f"Liitospisteitä: {len(liitospisteet)}")
-                    if kojeasento_liitospisteet:
-                        liitos_nayttolista = [
-                            f"{x} 📐" if x in kojeasento_liitospisteet else str(x)
-                            for x in liitospisteet
-                        ]
-                        st.write(f"({', '.join(liitos_nayttolista)})")
-                        st.caption(f"📐 = mitattu kahdesta kojeasennosta ({len(kojeasento_liitospisteet)} kpl)")
-                    else:
-                        st.write(f"({', '.join(str(x) for x in liitospisteet)})")
-                    korkeusliitokset = a.get("korkeusliitokset", [])
-                    if korkeusliitokset:
-                        st.caption(f"Korkeusliitokset (vain korkeus): {', '.join(str(x) for x in korkeusliitokset)}")
-                    kulmavirheet = a.get("kulmavirheet", [])
-                    if kulmavirheet:
-                        st.caption("Kulmavirhe:")
-                        for kv in kulmavirheet:
-                            st.caption(f"  {kv['liitospiste']}: {kv['kulmavirhe_rad']:.6f}° ({kv['kulmavirhe_rad']*3600:.2f}″)")
-                with col3:
-                    sijainti = a.get("sijainti")
-                    if sijainti:
-                        st.write(f"Sijaintiluokka: **{sijainti['S']}**")
-                        st.write(sijainti["luokka"])
-                        st.caption(
-                            f"Etäisyys reunasta: {sijainti['etaisyys_m']} m "
-                            f"(+ = sisällä, - = ulkona), keskisivu {sijainti['keskisivu_m']} m"
-                        )
-                    else:
-                        st.write("Sijaintiluokitus ei laskettavissa (alle 3 liitospistettä)")
-                laatu = a.get("laatu")
-
-                if laatu:
-                    st.markdown("---")
-                    st.write(
-                        f"Asemapisteen kokonaislaatu: "
-                        f"{laatu.get('kokonaispiste')} / 100"
-                    )
-                    st.write(
-                        f"Laatuluokka: {laatu.get('luokka')}"
-                    )
-
-                    st.caption(
-                        f"Liitospisteitä: "
-                        f"{laatu.get('liitospisteita')} | "
-                        f"PDOP-keskiarvo: "
-                        f"{laatu.get('pdop_keskiarvo')} | "
-                        f"Huonoin PDOP: "
-                        f"{laatu.get('pdop_huonoimmillaan')} | "
-                        f"Kulmapeitto: "
-                        f"{laatu.get('kulmapeitto_deg')}°"
-                    )
-
-                    st.caption(
-                        f"RMS-vaakaresiduaali: "
-                        f"{laatu.get('rms_residuaali_m')} m | "
-                        f"Suurin vaakaresiduaali: "
-                        f"{laatu.get('suurin_residuaali_m')} m"
-                    )
-
-                    if laatu.get("varoitukset"):
-                        for varoitus in laatu["varoitukset"]:
-                            st.warning(varoitus)
-                with col_kartta:
-                    try:
-                        tmp_kartta_dir = tempfile.mkdtemp()
-                        kartta_path = os.path.join(tmp_kartta_dir, f"asema_{a['nimi']}.png")
-                        tulos_polku = _ajastettu(f"asemapistekartta {a['nimi']}", jx.piirra_asemapiste_kartta, a, kartta_path)
-                        if tulos_polku and os.path.exists(tulos_polku):
-                            st.image(tulos_polku, caption="tähti = asema, sininen = liitospiste, harmaa = korkeuspiste")
-                        else:
-                            st.caption("Karttaa ei voitu piirtää (koordinaatit puuttuvat).")
-                    except Exception as karttavirhe:
-                        st.caption(f"Karttaa ei voitu piirtää: {karttavirhe}")
-                if a.get("residuaalit"):
-                    st.caption("Residuaalit per liitospiste:")
-                    st.dataframe(
-                        [{"Liitospiste": r["liitospiste"], "ΔN (m)": r["delta_n"], "ΔE (m)": r["delta_e"],
-                          "ΔHz (m)": (math.hypot(r["delta_n"], r["delta_e"])
-                                      if r["delta_n"] is not None and r["delta_e"] is not None else None)}
-                         for r in a["residuaalit"]],
-                        width="stretch",
-                    )
-                st.markdown("---")
-
-    if raportti["varoitukset_2x"]:
-        with st.expander(f"⚠️ MML:n 2x-säännön ylitykset ({len(raportti['varoitukset_2x'])} kpl)", expanded=True):
-            st.dataframe(raportti["varoitukset_2x"], width="stretch")
-
     # --- RTK-/GPS-laatutiedot ---
     rtk_laatupisteet = [
         p for p in kaikki_pisteet
@@ -1197,7 +1253,7 @@ if ladattu_tiedosto is not None and raportti:
         )
     ]
 
-    with st.expander(f"GPS-/RTK-laatutiedot ({len(rtk_laatupisteet)} kpl)", expanded=True):
+    with st.expander(f"GPS-/RTK-laatutiedot ({len(rtk_laatupisteet)} kpl)"):
         if rtk_laatupisteet:
             st.dataframe(
                 [
@@ -1215,11 +1271,7 @@ if ladattu_tiedosto is not None and raportti:
                 width="stretch",
             )
         else:
-            st.warning(
-                "Yhtään PDOP-, HDOP-, VDOP- tai satelliittiarvoa ei löytynyt "
-                "jäsennetyistä pisteistä. Tämä kertoo, että tieto katoaa vielä "
-                "JobXML-jäsennyksessä eikä pelkästään näkymässä."
-            )
+            st.caption("Tiedostossa ei ole GNSS-mittauksia, joilla olisi PDOP-, HDOP-, VDOP- tai satelliittitieto.")
 
     if hylatyt:
         with st.expander(f"Hylätyt (lasketut) pisteet ({len(hylatyt)} kpl)"):
@@ -1245,158 +1297,205 @@ if ladattu_tiedosto is not None and raportti:
         )
 
     st.divider()
-    with st.container():
-        st.caption("Tallennus vie kantaan pisteet, mittausraportin (yhteenveto ja PDF) ja asemapisteet"
-                   + (" sekä yllä näkyvän seinälinjan (valittu järjestys, kantakartta- ja LiDAR-valinnat)"
-                      if sl_tallennettava else "")
-                   + ". Saman kiinteistön ja tiedoston aiemmat pisteet, raportti ja asemat"
-                   + (" sekä seinälinja" if sl_tallennettava else "") + " korvataan.")
-        if st.button("Tallenna mittaukset kantaan"):
-            jobxml_tunnus_lopullinen = jobxml_tunnus_syote
-
-            if jobxml_hakutapa == "Osoite":
-                if not jobxml_osoite_syote or not jobxml_osoite_syote.strip():
-                    st.warning("Anna katuosoite ennen tallennusta.")
-                    st.stop()
-                with st.spinner("Etsitään kiinteistötunnusta osoitteelle..."):
-                    jobxml_tunnus_lopullinen, _, _ = hk.hae_kiinteistotunnus_osoitteella(
-                        jobxml_osoite_syote.strip(), (jobxml_kaupunki_syote or "").strip(), hk.MML_API_KEY
-                    )
-                st.success(f"Osoite tunnistettu kiinteistöksi: **{jobxml_tunnus_lopullinen}**")
-
-            if not jobxml_tunnus_lopullinen or not jobxml_tunnus_lopullinen.strip():
-                st.warning("Anna kiinteistötunnus ennen tallennusta.")
-            else:
-                tallennettavat = jx.pisteet_tallennettavaksi(kaikki_pisteet)
-                maara = jx.tallenna_mittaukset_kantaan(jobxml_tunnus_lopullinen.strip(), tallennettavat, hk.DB_CONN,
-                                                       raportti)
-                viivoja = (jx.tallenna_seinalinjat_kantaan(jobxml_tunnus_lopullinen.strip(), sl_tallennettava[0],
-                                                           ladattu_tiedosto.name, hk.DB_CONN, sl_tallennettava[1])
-                           if sl_tallennettava else 0)
-                asemia = jx.tallenna_raportti_kantaan(jobxml_tunnus_lopullinen.strip(), raportti, kaikki_pisteet,
-                                                      hylatyt, pdf_bytes, hk.DB_CONN)
-                st.success(
-                    f"{maara} pistettä tallennettu kentalla_mitatut_pisteet-tauluun "
-                    f"({len(kaikki_pisteet) - len(tallennettavat)} liitospisteen RTK-alkuperäismittausta "
-                    "jätettiin pois tuplapisteiden välttämiseksi)"
-                    + (f", {viivoja} seinälinjaa seinalinjat-tauluun" if viivoja else "")
-                    + f", mittausraportti{'' if pdf_bytes else ' (ilman PDF:ää)'} mittausraportit-tauluun"
-                    + f" ja {asemia} asemapistettä asemapisteet-tauluun."
-                )
+    st.subheader("Tallennus kantaan")
+    if jobxml_hakutapa == "Kiinteistötunnus":
+        kohde = (jobxml_tunnus_syote or "").strip()
+        st.markdown(f"Kiinteistö: **{kohde}**" if kohde else
+                    "Anna kiinteistötunnus sivun alussa (Kiinteistötunnus, johon mittaukset liittyvät).")
+    st.caption("Tallennus vie kantaan pisteet, mittausraportin (yhteenveto ja PDF) ja asemapisteet"
+               + (" sekä yllä näkyvän seinälinjan (valittu järjestys, kantakartta- ja LiDAR-valinnat)"
+                  if sl_tallennettava else "")
+               + ". Saman kiinteistön ja tiedoston aiemmat pisteet, raportti ja asemat"
+               + (" sekä seinälinja" if sl_tallennettava else "") + " korvataan.")
+    if st.button("Tallenna mittaukset kantaan", type="primary"):
+        _tallenna_mittaukset(jobxml_tunnus_syote, jobxml_osoite_syote, jobxml_kaupunki_syote, ladattu_tiedosto,
+                             raportti, kaikki_pisteet, hylatyt, pdf_bytes, sl_tallennettava)
 
 
 # ---------------------------------------------------------------------------
 # Tallennetut mittausraportit
 # ---------------------------------------------------------------------------
-st.divider()
-st.header("Tallennetut mittausraportit")
-st.caption("Kantaan tallennettujen mittausten raportit uusin ensin. Tyhjä kiinteistötunnus = 50 uusinta.")
-raportti_tunnus = st.text_input("Kiinteistötunnus", key="raportit_tunnus")
-if st.button("Hae raportit", key="raportit_hae"):
-    st.session_state["_raportit_haku"] = raportti_tunnus.strip() or None
-# Lista haetaan joka ajolla kannasta, jotta uudelleentallennetut ja poistetut raportit näkyvät oikein
-tallennetut_raportit = None
-if "_raportit_haku" in st.session_state:
+def _tallennetut_raportit():
+    st.caption("Kantaan tallennettujen mittausten raportit uusin ensin. Tyhjä kiinteistötunnus = 50 uusinta.")
+    raportti_tunnus = st.text_input("Kiinteistötunnus", key="raportit_tunnus")
+    if st.button("Hae raportit", key="raportit_hae"):
+        st.session_state["_raportit_haku"] = raportti_tunnus.strip() or None
+    if "_raportit_haku" not in st.session_state:
+        return
+    # Lista haetaan joka ajolla kannasta, jotta uudelleentallennetut ja poistetut raportit näkyvät oikein
     try:
         tallennetut_raportit = jx.hae_raportit(hk.DB_CONN, st.session_state["_raportit_haku"])
     except Exception as e:
-        st.error(f"Raporttien haku epäonnistui: {e}")
-if tallennetut_raportit is not None:
+        st.error(f"Raporttien haku epäonnistui: {_virheteksti(e)}")
+        return
     if not tallennetut_raportit:
         st.info("Ei tallennettuja raportteja.")
-    else:
-        st.dataframe(
-            [{"Kiinteistö": r["kiinteistotunnus"], "Tiedosto": r["lahdetiedosto"], "Työ": r["tyon_nimi"],
-              "Mittauspäivä": r["mittauspaiva"], "Asemia": r["asemia"], "Pisteitä": r["mitattuja_pisteita"],
-              "Huonoin asema": r["huonoin_laatuluokka"], "Tarkistettavaa": r["tarkistukset"],
-              "Tallennettu": r["tallennettu"].strftime("%d.%m.%Y %H:%M") if r["tallennettu"] else None}
-             for r in tallennetut_raportit],
-            width="stretch",
-        )
-        valinta = st.selectbox(
-            "Lataa raportti", range(len(tallennetut_raportit)), key="raportit_valinta",
-            format_func=lambda i: (f"{tallennetut_raportit[i]['kiinteistotunnus']} -- "
-                                   f"{tallennetut_raportit[i]['lahdetiedosto']} ({tallennetut_raportit[i]['mittauspaiva']})"))
-        valittu_raportti = tallennetut_raportit[min(valinta or 0, len(tallennetut_raportit) - 1)]
-        if valittu_raportti["pdf_kt"] is None:
-            st.caption("Raportti tallennettiin ilman PDF:ää.")
-        else:
-            try:
-                pdf = jx.hae_raportin_pdf(valittu_raportti["kiinteistotunnus"], valittu_raportti["lahdetiedosto"],
-                                          hk.DB_CONN)
-            except Exception as e:
-                pdf = None
-                st.error(f"PDF:n haku epäonnistui: {e}")
-            else:
-                if pdf is None:
-                    st.warning("Raportin PDF:ää ei löytynyt kannasta (raportti on ehkä poistettu).")
-            if pdf:
-                st.download_button(f"Lataa mittausraportti (PDF, {valittu_raportti['pdf_kt']} kt)", pdf,
-                                   file_name=f"mittausraportti_{valittu_raportti['kiinteistotunnus']}_"
-                                             f"{os.path.splitext(valittu_raportti['lahdetiedosto'] or 'raportti')[0]}.pdf",
-                                   mime="application/pdf", key="raportit_lataus")
-
-
-# ---------------------------------------------------------------------------
-# Tallennettujen JobXML-mittausten poisto kannasta
-# ---------------------------------------------------------------------------
-st.divider()
-st.header("Poista tallennetut mittaukset kannasta")
-st.caption(
-    "Tietokanta kasvaa jokaisella tuonnilla ja sitä myötä Qgis:ssä näkyvät mittauspisteet. "
-    "Pisteiden kanssa poistetaan samat seinälinjat, mittausraportit ja asemapisteet."
-    " Tietokantaa ei tyhjennetä automaattisesti (toisin kuin kiintopistehaun "
-    "väliaikaistaulut). Tässä voi siivota vanhoja tai virheellisiä tuonteja."
-)
-
-if _poisto_sallittu("mittaukset"):
-    poisto_tapa = st.radio(
-        "Mitä haluat poistaa?",
-        ["Yhden kiinteistön kaikki mittaukset", "Vain yhden JobXML-tiedoston tuomat pisteet", "KOKO taulu (kaikki kiinteistöt)"],
-        key="poisto_tapa",
+        return
+    st.dataframe(
+        [{"Kiinteistö": r["kiinteistotunnus"], "Tiedosto": r["lahdetiedosto"], "Työ": r["tyon_nimi"],
+          "Mittauspäivä": r["mittauspaiva"], "Asemia": r["asemia"], "Pisteitä": r["mitattuja_pisteita"],
+          "Huonoin asema": r["huonoin_laatuluokka"], "Tarkistettavaa": r["tarkistukset"],
+          "Tallennettu": r["tallennettu"].strftime("%d.%m.%Y %H:%M") if r["tallennettu"] else None}
+         for r in tallennetut_raportit],
+        width="stretch",
     )
+    valinta = st.selectbox(
+        "Lataa raportti", range(len(tallennetut_raportit)), key="raportit_valinta",
+        format_func=lambda i: (f"{tallennetut_raportit[i]['kiinteistotunnus']} -- "
+                               f"{tallennetut_raportit[i]['lahdetiedosto']} ({tallennetut_raportit[i]['mittauspaiva']})"))
+    valittu_raportti = tallennetut_raportit[min(valinta or 0, len(tallennetut_raportit) - 1)]
+    if valittu_raportti["pdf_kt"] is None:
+        st.caption("Raportti tallennettiin ilman PDF:ää.")
+        return
+    tunnus, tiedosto = valittu_raportti["kiinteistotunnus"], valittu_raportti["lahdetiedosto"]
+    # PDF haetaan kannasta vasta napin painalluksella eikä joka ajolla (sovellus ajetaan uudelleen jokaisesta
+    # valinnasta millä tahansa välilehdellä)
+    st.download_button(f"Lataa mittausraportti (PDF, {valittu_raportti['pdf_kt']} kt)",
+                       lambda: jx.hae_raportin_pdf(tunnus, tiedosto, hk.DB_CONN) or b"",
+                       file_name=f"mittausraportti_{tunnus}_{os.path.splitext(tiedosto or 'raportti')[0]}.pdf",
+                       mime="application/pdf", key="raportit_lataus", on_click="ignore")
 
-    if poisto_tapa == "Yhden kiinteistön kaikki mittaukset":
-        poisto_tunnus = st.text_input("Kiinteistötunnus, jonka mittaukset poistetaan", key="poisto_tunnus")
-        vahvistus = st.checkbox(f"Vahvistan: poista kaikki tallennetut mittaukset kiinteistölle '{poisto_tunnus}'", key="poisto_vahvistus_1")
-        if st.button("Poista", key="poista_nappi_1"):
-            if not poisto_tunnus.strip():
-                st.warning("Anna kiinteistötunnus.")
-            elif not vahvistus:
-                st.warning("Rastita vahvistus ennen poistoa.")
-            else:
-                maara, viivoja, raportteja = jx.poista_mittaukset_kannasta(poisto_tunnus.strip(), hk.DB_CONN)
-                st.success(f"{maara} pistettä, {viivoja} seinälinjaa ja {raportteja} raporttia poistettu "
-                           f"kiinteistöltä {poisto_tunnus.strip()}.")
 
-    elif poisto_tapa == "Vain yhden JobXML-tiedoston tuomat pisteet":
-        poisto_tiedosto = st.text_input(
-            "Lähdetiedoston nimi (esim. torpparimaentie.xml -- sama nimi kuin ladatussa tiedostossa)",
-            key="poisto_tiedosto",
+# ---------------------------------------------------------------------------
+# Ylläpito: omien kiintopisteiden tuonti ja poistot kannasta
+# ---------------------------------------------------------------------------
+def _omat_kiintopisteet():
+    st.subheader("Tuo omat kiintopisteet (txt/krd, ETRS-GK25)")
+    st.caption(
+        "Esim. Helsingin kaupungin omat kiintopisteet, joita ei ole avoimissa rajapinnoissa. "
+        "N- ja E-koordinaatit tunnistetaan suuruusluokasta, joten sarakkeiden järjestys ei haittaa. "
+        "Pistetunnus on ensimmäinen sarake (esim. 'nimi N E Z'), krd-muodossa "
+        "('1 0 koodi numero E N Z') koordinaatteja edeltävä numero. Korkeus on "
+        "koordinaattien jälkeinen luku. Pisteet tallennetaan kiintopisteiden joukkoon luokalla "
+        f"'{hk.OMA_KIINTOPISTE_LUOKKA}', ja haku löytää ne MML:n pisteiden rinnalta."
+    )
+    oma_tiedosto = st.file_uploader("Kiintopisteet tekstitiedostona", type=["txt", "csv", "krd"],
+                                    key="oma_kp_tiedosto")
+    if oma_tiedosto is None:
+        return
+    raaka = oma_tiedosto.getvalue()
+    try:
+        teksti = raaka.decode("utf-8")
+    except UnicodeDecodeError:
+        teksti = raaka.decode("latin-1")
+    omat_pisteet, ohitetut = hk.jasenna_kiintopiste_txt(teksti)
+    st.write(f"Tunnistettiin **{len(omat_pisteet)}** kiintopistettä, **{len(ohitetut)}** riviä ohitettiin.")
+    if omat_pisteet:
+        st.dataframe(
+            [{"Tunnus": p["tunnus"], "Koodi": p["koodi"], "N": p["n"], "E": p["e"], "Korkeus": p["korkeus"]}
+             for p in omat_pisteet],
+            width="stretch", hide_index=True,
         )
-        vahvistus2 = st.checkbox(f"Vahvistan: poista kaikki pisteet, jotka tulivat tiedostosta '{poisto_tiedosto}'", key="poisto_vahvistus_2")
-        if st.button("Poista", key="poista_nappi_2"):
-            if not poisto_tiedosto.strip():
-                st.warning("Anna tiedoston nimi.")
-            elif not vahvistus2:
-                st.warning("Rastita vahvistus ennen poistoa.")
-            else:
-                maara, viivoja, raportteja = jx.poista_mittaukset_lahdetiedostolla(poisto_tiedosto.strip(), hk.DB_CONN)
-                st.success(f"{maara} pistettä, {viivoja} seinälinjaa ja {raportteja} raporttia poistettu "
-                           f"tiedostosta {poisto_tiedosto.strip()}.")
+        tunnukset = collections.Counter(p["tunnus"] for p in omat_pisteet)
+        kahdesti = [t for t, maara in tunnukset.items() if maara > 1]
+        if kahdesti:
+            st.info(f"{len(kahdesti)} tunnusta esiintyy useammin kuin kerran (esim. "
+                    f"{', '.join(kahdesti[:5])}). Kaikki pisteet tallennetaan -- haku tehdään sijainnin mukaan.")
+        ulkona = [p["tunnus"] for p in omat_pisteet if not hk.on_helsingin_alueella(p["e"], p["n"])]
+        if ulkona:
+            st.warning(f"{len(ulkona)} pistettä on Helsingin alueen ulkopuolella "
+                       f"(esim. {', '.join(ulkona[:5])}). Tarkista koordinaatisto.")
+    if ohitetut:
+        with st.expander("Ohitetut rivit (ei tunnistettu N- ja E-koordinaattia)"):
+            st.dataframe([{"Rivi": nro, "Sisältö": rivi} for nro, rivi in ohitetut],
+                         width="stretch", hide_index=True)
+    if omat_pisteet and st.button("Tallenna kiintopisteet kantaan", key="oma_kp_tallenna"):
+        try:
+            maara = hk.tallenna_omat_kiintopisteet(omat_pisteet, hk.DB_CONN)
+            st.success(f"{maara} kiintopistettä tallennettu kantaan.")
+        except Exception as e:
+            st.error(f"Tallennus epäonnistui: {_virheteksti(e)}")
 
-    else:
-        st.warning("Tämä poistaa KAIKKIEN kiinteistöjen KAIKKI tallennetut mittaukset peruuttamattomasti.")
-        vahvistus3 = st.checkbox("Vahvistan: tyhjennä kaikki tallennetut mittaukset (pisteet, seinälinjat, "
-                                 "raportit ja asemapisteet)",
-                                 key="poisto_vahvistus_3")
-        if st.button("Tyhjennä koko taulu", key="poista_nappi_3"):
-            if not vahvistus3:
-                st.warning("Rastita vahvistus ennen tyhjennystä.")
-            else:
-                maara, viivoja, raportteja = jx.poista_kaikki_mittaukset(hk.DB_CONN)
-                st.success(f"Taulut tyhjennetty -- {maara} pistettä, {viivoja} seinälinjaa ja {raportteja} "
-                           "raporttia poistettu.")
+
+POISTOT = ("Yhden kiinteistön kaikki mittaukset", "Yhden JobXML-tiedoston mittaukset",
+           "KOKO mittaustaulut (kaikki kiinteistöt)", "Omat (tiedostosta tuodut) kiintopisteet")
+
+
+def _poistot():
+    st.subheader("Poista tietoja kannasta")
+    st.caption(
+        "Tietokanta kasvaa jokaisella tuonnilla ja sitä myötä QGIS:ssä näkyvät mittauspisteet. "
+        "Mittausten kanssa poistetaan samat seinälinjat, mittausraportit ja asemapisteet. "
+        "Kantaa ei tyhjennetä automaattisesti (toisin kuin kiintopistehaun väliaikaistaulut). "
+        "Tässä voi siivota vanhoja tai virheellisiä tuonteja."
+    )
+    if not _poisto_sallittu():
+        return
+    poisto_tapa = st.radio("Mitä haluat poistaa?", POISTOT, key="poisto_tapa")
+
+    try:
+        if poisto_tapa == POISTOT[0]:
+            poisto_tunnus = st.text_input("Kiinteistötunnus, jonka mittaukset poistetaan", key="poisto_tunnus")
+            vahvistus = st.checkbox(f"Vahvistan: poista kaikki tallennetut mittaukset kiinteistölle '{poisto_tunnus}'",
+                                    key="poisto_vahvistus_1")
+            if st.button("Poista", key="poista_nappi_1"):
+                if not poisto_tunnus.strip():
+                    st.warning("Anna kiinteistötunnus.")
+                elif not vahvistus:
+                    st.warning("Rastita vahvistus ennen poistoa.")
+                else:
+                    maara, viivoja, raportteja = jx.poista_mittaukset_kannasta(poisto_tunnus.strip(), hk.DB_CONN)
+                    st.success(f"{maara} pistettä, {viivoja} seinälinjaa ja {raportteja} raporttia poistettu "
+                               f"kiinteistöltä {poisto_tunnus.strip()}.")
+
+        elif poisto_tapa == POISTOT[1]:
+            poisto_tiedosto = st.text_input(
+                "Lähdetiedoston nimi (esim. torpparimaentie.xml -- sama nimi kuin ladatussa tiedostossa)",
+                key="poisto_tiedosto",
+            )
+            vahvistus2 = st.checkbox(f"Vahvistan: poista kaikki mittaukset, jotka tulivat tiedostosta "
+                                     f"'{poisto_tiedosto}' (kaikilta kiinteistöiltä)", key="poisto_vahvistus_2")
+            if st.button("Poista", key="poista_nappi_2"):
+                if not poisto_tiedosto.strip():
+                    st.warning("Anna tiedoston nimi.")
+                elif not vahvistus2:
+                    st.warning("Rastita vahvistus ennen poistoa.")
+                else:
+                    maara, viivoja, raportteja = jx.poista_mittaukset_lahdetiedostolla(poisto_tiedosto.strip(),
+                                                                                      hk.DB_CONN)
+                    st.success(f"{maara} pistettä, {viivoja} seinälinjaa ja {raportteja} raporttia poistettu "
+                               f"tiedostosta {poisto_tiedosto.strip()}.")
+
+        elif poisto_tapa == POISTOT[2]:
+            st.warning("Tämä poistaa KAIKKIEN kiinteistöjen KAIKKI tallennetut mittaukset peruuttamattomasti.")
+            vahvistus3 = st.checkbox("Vahvistan: tyhjennä kaikki tallennetut mittaukset (pisteet, seinälinjat, "
+                                     "raportit ja asemapisteet)",
+                                     key="poisto_vahvistus_3")
+            if st.button("Tyhjennä koko taulu", key="poista_nappi_3"):
+                if not vahvistus3:
+                    st.warning("Rastita vahvistus ennen tyhjennystä.")
+                else:
+                    maara, viivoja, raportteja = jx.poista_kaikki_mittaukset(hk.DB_CONN)
+                    st.success(f"Taulut tyhjennetty -- {maara} pistettä, {viivoja} seinälinjaa ja {raportteja} "
+                               "raporttia poistettu.")
+
+        else:
+            vahvistus_omat = st.checkbox("Vahvistan: poista kaikki omat (tiedostosta tuodut) kiintopisteet kannasta",
+                                         key="oma_kp_poisto_vahvistus")
+            if st.button("Poista omat kiintopisteet", key="oma_kp_poista"):
+                if not vahvistus_omat:
+                    st.warning("Rastita vahvistus ennen poistoa.")
+                else:
+                    maara = hk.poista_omat_kiintopisteet(hk.DB_CONN)
+                    st.success(f"{maara} omaa kiintopistettä poistettu. MML:n kiintopisteet jäivät ennalleen.")
+    except Exception as e:
+        st.error(f"Poisto epäonnistui: {_virheteksti(e)}")
+
+
+# Välilehdet ajetaan kaikki joka kerta (ei on_change="rerun"): laiskoissa välilehdissä piilossa olevan
+# välilehden kentät tyhjenisivät, esim. ladattu JobXML katoaisi välilehteä vaihdettaessa.
+valilehti_haku, valilehti_mittaukset, valilehti_raportit, valilehti_yllapito = st.tabs(
+    ["Kiinteistöhaku", "Mittausten tuonti (JobXML)", "Tallennetut mittausraportit", "Ylläpito"])
+with valilehti_haku:
+    _kiinteistohaku()
+with valilehti_mittaukset:
+    _mittausten_tuonti()
+with valilehti_raportit:
+    _tallennetut_raportit()
+with valilehti_yllapito:
+    _omat_kiintopisteet()
+    st.divider()
+    _poistot()
 
 
 if time.time() - _AJON_ALKU > 3.0:

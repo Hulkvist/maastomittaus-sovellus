@@ -1781,6 +1781,18 @@ def hae_raportin_pdf(kiinteistotunnus, lahdetiedosto, db_conn):
     return bytes(rivi[0]) if rivi and rivi[0] is not None else None
 
 
+def tiedoston_muut_kiinteistot(lahdetiedosto, kiinteistotunnus, db_conn):
+    """Kiinteistötunnukset, joille sama lähdetiedosto on tallennettu kantaan tämän lisäksi (esim. ensin
+    väärällä tunnuksella). Tallennus korvaa vain saman kiinteistön ja tiedoston rivit."""
+    import hae_kiintopisteet as hk
+
+    with hk.kanta(db_conn) as cur:
+        cur.execute("SELECT DISTINCT kiinteistotunnus FROM kentalla_mitatut_pisteet "
+                    "WHERE lahdetiedosto = %s AND kiinteistotunnus <> %s ORDER BY 1;",
+                    (lahdetiedosto, kiinteistotunnus))
+        return [rivi[0] for rivi in cur.fetchall()]
+
+
 def poista_mittaukset_kannasta(kiinteistotunnus, db_conn):
     """Poistaa KAIKKI annetulle kiinteistötunnukselle tallennetut pisteet, seinälinjat,
     mittausraportit ja asemapisteet. Palauttaa (pisteet, viivat, raportit)."""
