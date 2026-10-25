@@ -78,7 +78,7 @@ Taulut (kaikki EPSG:3879):
 | `asemapisteet` | Kojeasemat laatuluokkineen, residuaaleineen ja keskivirheineen (mm); `liitospisteet` = orientoinnin liitospisteet ja niiden vaakaresiduaalit |
 | `asemien_liitokset` | Viiva asemalta jokaiseen liitospisteeseen ja korkeusliitokseen residuaaleineen (mm) |
 
-*Tallenna mittaukset kantaan* vie pisteet, mittausraportin, asemapisteet ja Seinälinja-osiossa näkyvän seinälinjan (valittu järjestys, kantakartta- ja LiDAR-valinnat) samalla kertaa. Saman kiinteistön ja tiedoston pisteet, raportti, asemat ja seinälinja korvataan uudelleentallennuksessa (ei tuplia). Tallennetut raportit haetaan ja PDF:t ladataan sovelluksen osiosta *Tallennetut mittausraportit*.
+*Tallenna mittaukset kantaan* vie pisteet, mittausraportin, asemapisteet ja Seinälinja-osiossa näkyvän seinälinjan (valittu järjestys, kantakartta- ja LiDAR-valinnat) samalla kertaa. Saman kiinteistön ja tiedoston pisteet, raportti, asemat ja seinälinja korvataan uudelleentallennuksessa (ei tuplia). Jos sama tiedosto on tallennettu aiemmin toiselle kiinteistölle (esim. ensin väärällä tunnuksella), tallennus huomauttaa siitä; vanhat rivit poistetaan Ylläpito-välilehdellä. Tallennetut raportit haetaan ja PDF:t ladataan välilehdeltä *Tallennetut mittausraportit*.
 
 ### QGIS-tyylit
 
@@ -105,7 +105,7 @@ Vain muutoksen jälkeen tallennetuilla mittauksilla on järjestys; vanhat rivit 
 
 ![Animaation vaiheet](qgis_tyylit/animaatio.png)
 
-Tyylit tehdään skriptillä `qgis_tyylit/tee_tyylit.py` QGIS:n Pythonilla (ohje skriptin alussa). Seinälinjan kaaret tallennetaan tihennettynä murtoviivana. Jos LiDAR-DXF oli mukana, viivalle tallennetaan myös poikkeama LiDAR-seinistä (`lidar_keskiarvo_cm`, `lidar_suurin_cm`, `lidar_peitto_pros`). Poisto-osio poistaa pisteet ja seinälinjat yhdessä.
+Tyylit tehdään skriptillä `qgis_tyylit/tee_tyylit.py` QGIS:n Pythonilla (ohje skriptin alussa). Seinälinjan kaaret tallennetaan tihennettynä murtoviivana. Jos LiDAR-DXF oli mukana, viivalle tallennetaan myös poikkeama LiDAR-seinistä (`lidar_keskiarvo_cm`, `lidar_suurin_cm`, `lidar_peitto_pros`). Ylläpito-välilehden poisto poistaa pisteet ja seinälinjat yhdessä.
 
 ## Käynnistys
 
@@ -117,6 +117,8 @@ Tyylit tehdään skriptillä `qgis_tyylit/tee_tyylit.py` QGIS:n Pythonilla (ohje
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+Sovelluksessa on neljä välilehteä: **Kiinteistöhaku** (kiintopisteet, rajamerkit, rajaviivat ja rakennusten nurkat), **Mittausten tuonti (JobXML)** (raportti, seinälinja, lataukset ja tallennus kantaan), **Tallennetut mittausraportit** ja **Ylläpito** (omien kiintopisteiden tuonti ja poistot kannasta). Kaikki välilehdet pysyvät tallessa välilehteä vaihdettaessa, esim. ladattu JobXML ja seinälinjan muokkaukset.
 
 **Komentorivi (kiintopistehaku ilman käyttöliittymää):**
 
@@ -139,7 +141,7 @@ Uudet pisteet lisätään kantaan, ja samannimiset pisteet korvataan. Muiden alu
 
 ## Omat kiintopisteet (txt)
 
-Kiintopisteet, joita ei ole avoimissa rajapinnoissa (esim. Helsingin kaupungin omat kiintopisteet), voi tuoda teksti- tai krd-tiedostosta kohdassa **Tuo omat kiintopisteet (txt/krd, ETRS-GK25)**. Ne tallennetaan `kiintopisteet`-tauluun luokalla `Helsinki (oma tiedosto)`. Helsingin kiinteistöillä haku käyttää vain näitä pisteitä, muualla ne näkyvät MML:n pisteiden rinnalla.
+Kiintopisteet, joita ei ole avoimissa rajapinnoissa (esim. Helsingin kaupungin omat kiintopisteet), voi tuoda teksti- tai krd-tiedostosta Ylläpito-välilehdellä kohdassa **Tuo omat kiintopisteet (txt/krd, ETRS-GK25)**. Ne tallennetaan `kiintopisteet`-tauluun luokalla `Helsinki (oma tiedosto)`. Helsingin kiinteistöillä haku käyttää vain näitä pisteitä, muualla ne näkyvät MML:n pisteiden rinnalla.
 
 - N (6,6–7,8 milj.) ja E (25–26 milj.) tunnistetaan suuruusluokasta, joten sarakkeiden järjestys ei haittaa. Korkeus on koordinaattien jälkeinen luku (itseisarvo alle 1000), ja se voi puuttua.
 - Pistetunnus on ensimmäinen sarake (`nimi N E Z`, `nimi koodi N E Z`). Jos ennen koordinaatteja on vähintään kolme saraketta, kuten krd-muodossa `1 0 koodi numero E N Z`, tunnus on koordinaatteja edeltävä sarake ja koodi sitä edeltävä. Koodi näkyy esikatselussa, mutta sitä ei tallenneta.
