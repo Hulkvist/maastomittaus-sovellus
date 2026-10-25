@@ -562,14 +562,20 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     kohteet = slm.napsahduspisteet(jx.pisteet_tallennettavaksi(pisteet), sl_tulos)
     st.caption("Raahaa kärkeä hiirellä: se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen, kun se on "
                "lähellä (kärki muuttuu vihreäksi). Klikkaa viivaa = uusi kärki, oikea klikkaus viivaan = poista "
-               "jana. Tuplaklikkaa (tai oikea klikkaus) kärkeä = poista kärki. Punainen kärki = laskettu kulma, "
+               "jana, oikea klikkaus kärkeen = poista kärki. Tuplaklikkaa kolmea pistettä tai kärkeä peräkkäin = "
+               "täydennä suorakulmioksi (valitut näkyvät oransseina numeroina, saman tuplaklikkaus = pois, Esc = "
+               "tyhjennä). Punainen kärki = laskettu kulma, "
                "oranssi = käsin siirretty, punainen piste = suorakulmaisella mittauksella laskettu piste. Uuden viivan saa kartan vasemman yläkulman napista ✏ Uusi viiva. "
                "Taustakartan voi vaihtaa oikeasta yläkulmasta.")
     tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu)
     if tapahtuma:
         try:
             uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "uusi_viiva" and m["nimi"].startswith("Uusi"))
-            tila["muokkaukset"].append(slm.muokkaukseksi(tapahtuma, sl_tulos, kohteet, f"Uusi viiva {uusia + 1}"))
+            suorakulmioita = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "suorakulmio")
+            tila["muokkaukset"].append(slm.muokkaukseksi(tapahtuma, sl_tulos, kohteet, f"Uusi viiva {uusia + 1}",
+                                                         f"Suorakulmio {suorakulmioita + 1}"))
+        except ValueError as e:
+            st.warning(f"Suorakulmiota ei tehty: {e}" if tapahtuma.get("tyyppi") == "suorakulmio" else str(e))
         except Exception as e:
             st.error(f"Muokkausta ei voitu tehdä: {e}")
         else:
@@ -681,7 +687,8 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
 
     with st.container(border=True):
         st.markdown("**Täydennä suorakulmioksi**")
-        st.caption("Kolme mitattua talon kulmaa → neljäs kulma lasketaan. Suora kulma päätellään pisteistä; sen "
+        st.caption("Kolme mitattua talon kulmaa → neljäs kulma lasketaan (kartalla: tuplaklikkaa kolmea pistettä "
+                   "peräkkäin). Suora kulma päätellään pisteistä; sen "
                    f"pitää olla 90 ± {sl.SUORAKULMIO_MAX_KULMA:g}°. Jos kolme kulmaa ovat avoimen viivan kaikki "
                    "kärjet, viiva suljetaan; muuten syntyy uusi suljettu viiva.")
         sarakkeet = st.columns(3)
@@ -698,12 +705,9 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
             if st.button("Täydennä suorakulmioksi", key="sl_suorakulmio_lisaa"):
                 uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "suorakulmio")
                 pohja = next((x[4][0] for x in p if x[4]), valittu or sl_tulos["viivat"][0]["nimi"])
-                karjet = [{"e": p[i][0], "n": p[i][1], "z": p[i][2], "nimi": p[i][3] or kulmat[i],
-                           "laji": p[i][5] or "laskettu"} for i in r["jarjestys"]]
-                karjet.append({"e": round(r["neljas"][0], 3), "n": round(r["neljas"][1], 3), "z": None,
-                               "nimi": "suorakulmio", "laji": "laskettu"})
-                tila["muokkaukset"].append({"tyyppi": "suorakulmio", "nimi": f"Suorakulmio {uusia + 1}",
-                                            "pohja": pohja, "karjet": karjet})
+                tila["muokkaukset"].append(slm.suorakulmio(
+                    [{"e": x[0], "n": x[1], "z": x[2], "nimi": x[3] or kulmat[i], "laji": x[5]} for i, x in enumerate(p)],
+                    f"Suorakulmio {uusia + 1}", pohja))
                 st.rerun()
         except ValueError as e:
             st.warning(str(e))
