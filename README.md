@@ -47,7 +47,10 @@ PGDATABASE = "..."
 PGUSER = "..."
 PGPASSWORD = "..."
 SOVELLUKSEN_SALASANA = "..."
+POISTON_SALASANA = "..."
 ```
+
+`SOVELLUKSEN_SALASANA` päästää sovellukseen. `POISTON_SALASANA` on erillinen salasana tietojen poistoon kannasta (mittaukset, seinälinjat, raportit ja omat kiintopisteet); se kysytään kerran istunnossa. Ilman sitä poistot eivät ole käytössä. Salasana suojaa vain sovelluksen poistonapit: kannan tunnuksilla (esim. QGIS) voi edelleen poistaa suoraan.
 
 Älä vie `secrets.toml`-tiedostoa versionhallintaan.
 
