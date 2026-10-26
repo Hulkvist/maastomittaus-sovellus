@@ -74,6 +74,7 @@ JARJESTYS_KULMA_ASTE = 1.5
 JARJESTYS_TARKISTUS_M = 0.5    # muodosta_karjet:n kärjen suurin etäisyys päätellystä kärjestä
 JARJESTYS_MAX_PIILOKULMAT = 6  # piilokulmia yhdellä seinälinjalla enintään
 JARJESTYS_MAX_KOKEILUT = 200000  # järjestyksen päättelyn työmäärän yläraja (piilokulmavalintojen kokeilut)
+JARJESTYS_MAX_TARKISTUKSET = 200  # muodosta_karjet:lla tarkistettavia järjestyksiä enintään
 JARJESTYS_MAX_YKSINAISET = 6   # seiniä, joilta vain yksi 100-piste, enintään (suunnat kokeillaan 2^n)
 KANTAKARTTA_RAJA_M = 1.0      # mitatun pisteen suurin etäisyys kantakartan talon reunasta
 KANTAKARTTA_VINO_ASTE = 5.0   # kantakartan talon kulma poikkeaa suorasta -> riski
@@ -440,34 +441,73 @@ def _linjan_vaihtoehdot(pakolliset, ehdokkaat, sadat):
 
 def _yhteensopivat(linjat, budjetti):
     """Linjojen piilokulmavalinnat, jotka sopivat yhteen: piilokulma on sekä pysty- että
-    vaakalinjalla, joten jos kummallakin on 100-pisteitä, molempien valintojen pitää sisältää
-    se. linjat = [((akseli, linja), [(koko, joukko)])]. Palauttaa piilokulmajoukot pienimmästä
-    suurimpaan. budjetti = [jäljellä olevat kokeilut]; loppuessa ValueError."""
-    tulokset = []
-    valitut = {}
+    vaakalinjalla, joten molempien valintojen pitää olla siitä samaa mieltä. linjat =
+    [((akseli, linja), [(koko, joukko)])]. Tuottaa piilokulmajoukot pienimmästä suurimpaan. Haku
+    tehdään koko kerrallaan, joten pienimmät löytyvät luettelematta kaikkia yhdistelmiä (niitä voi
+    olla valtavasti). Linjan jäljellä olevat vaihtoehdot ovat bittimaski, jolloin risteyksen
+    karsinta on yksi AND. budjetti = [jäljellä olevat kokeilut]; loppuessa ValueError."""
+    joukot = [sorted((j for _, j in v), key=len) for _, v in linjat]   # koon mukaan: alin bitti = pienin
+    koot = [[len(j) for j in v] for v in joukot]
+    risteykset = {}   # n -> [(m, piilokulma-avain, maski m:n vaihtoehdoista, joissa avain on)]
+    for n, ((a, l), _) in enumerate(linjat):
+        risteykset[n] = []
+        for m, ((b, h), _) in enumerate(linjat):
+            if a != b:
+                k = (l, h) if a == 0 else (h, l)
+                maski = sum(1 << i for i, j in enumerate(joukot[m]) if k in j)
+                risteykset[n].append((m, k, maski))
 
-    def linjalla(joukko, akseli, linja):
-        return {k for k in joukko if k[akseli] == linja}
+    def pienin(maski):
+        return (maski & -maski).bit_length() - 1
 
-    def haku(n, yhdiste):
-        if n == len(linjat):
-            tulokset.append(yhdiste)
-            return
-        (akseli, linja), vaihtoehdot = linjat[n]
-        for _, joukko in vaihtoehdot:
+    def haku(raja, valitut, jaljella, loydetyt):
+        """Ratkaisut, joissa on täsmälleen raja piilokulmaa. Palauttaa True, jos jokin haara
+        karsittiin rajan takia (suuremmilla rajoilla voi löytyä lisää)."""
+        yhdiste = frozenset().union(*valitut)
+        if not jaljella:
+            if len(yhdiste) == raja:
+                loydetyt.add(yhdiste)
+            return False
+        # Alaraja: kulma on enintään kahdella linjalla (pysty ja vaaka), joten kulmia on vähintään
+        # puolet valittujen ja jäljellä olevien linjojen (pienimpien) joukkojen koosta yhteensä
+        summa = sum(map(len, valitut)) + sum(koot[m][pienin(x)] for m, x in jaljella.items())
+        if max(len(yhdiste), (summa + 1) // 2) > raja:
+            return True
+        # Ensin linja, jolla on vähiten vaihtoehtoja jäljellä. Valinnan jälkeen muiden linjojen
+        # vaihtoehdoista karsitaan heti ne, jotka ovat eri mieltä risteyksen piilokulmasta.
+        n = min(jaljella, key=lambda m: jaljella[m].bit_count())
+        karsittiin = False
+        x = jaljella[n]
+        while x:
+            i = pienin(x)
+            x &= x - 1
             budjetti[0] -= 1
             if budjetti[0] < 0:
                 raise ValueError("liikaa vaihtoehtoja")
-            if not linjalla(yhdiste, akseli, linja) <= joukko:
+            joukko = joukot[n][i]
+            if len(yhdiste | joukko) > raja:
+                karsittiin = True
                 continue
-            if any(not linjalla(joukko, a, l) <= valittu for (a, l), valittu in valitut.items()):
-                continue
-            valitut[(akseli, linja)] = joukko
-            haku(n + 1, yhdiste | joukko)
-            del valitut[(akseli, linja)]
+            karsitut = dict(jaljella)
+            del karsitut[n]
+            for m, k, maski in risteykset[n]:
+                if m in karsitut:
+                    karsitut[m] &= maski if k in joukko else ~maski
+                    if not karsitut[m]:
+                        break
+            else:
+                karsittiin = haku(raja, valitut + [joukko], karsitut, loydetyt) or karsittiin
+        return karsittiin
 
-    haku(0, frozenset())
-    return sorted(set(tulokset), key=len)
+    alku = {n: (1 << len(v)) - 1 for n, v in enumerate(joukot)}
+    raja = 0
+    while True:
+        loydetyt = set()
+        jatkuu = haku(raja, [], alku, loydetyt)
+        yield from sorted(loydetyt, key=sorted)
+        if not jatkuu:
+            return
+        raja += 1
 
 
 def _seinakarjet(r, kulmat, sijoitus, paat, budjetti):
@@ -500,6 +540,10 @@ def _seinakarjet(r, kulmat, sijoitus, paat, budjetti):
         for i, a in sijoitus.items():
             if a == akseli:
                 linjat.setdefault(ryhma[akseli][i], []).append(r[i][muu])
+        # Myös linjat, joilla on vain mitattuja kulmia: niidenkin kärjet pariutuvat seiniksi, joten
+        # piilokulma niiden risteyksessä rajaa hakua heti (muuten vasta _pariuta hylkäisi sen)
+        for linja in set(ryhma[akseli].values()):
+            linjat.setdefault(linja, [])
         for linja, sadat in linjat.items():
             linjalla = {k: i for k, i in mitatut.items() if k[akseli] == linja}
             pakolliset = [r[i][muu] for i in linjalla.values()]
@@ -542,7 +586,7 @@ def _pariuta(r, karjet, keski, sijoitus, ryhma):
         for linja, lista in linjoilla.items():
             if len(lista) % 2:
                 return None
-            lista.sort()
+            lista.sort(key=lambda t: t[0])   # avaimissa voi olla None (avoimen viivan pää)
             seinat = list(zip(lista[::2], lista[1::2]))
             if not _peittaa([(a[0], b[0]) for a, b in seinat], sadat.get(linja, [])):
                 return None
@@ -676,9 +720,13 @@ def _jarjesta_suorakulmaisesti(alku, valit, loppu, lidar=None):
                       f"{JARJESTYS_MAX_YKSINAISET} voidaan päätellä)"), frozenset()
     paa_vaihtoehdot = [{}] if suljettu else [{0: a, viimeinen: b} for a in (0, 1) for b in (0, 1)]
 
+    # Päättely olettaa suorat kulmat joka tapauksessa, joten muodosta_karjet:n "oletettu suora kulma"
+    # ei tee tuloksesta epäselvää: sen kärkien pitää silti osua päättelyn kärkiin (varoitus jää tulokseen).
+    epaselvat = tuple(t for t in EPASELVAT_VAROITUKSET if t != "oletettu suora kulma")
     budjetti = [JARJESTYS_MAX_KOKEILUT]
     erillisia = False
     hyvat = {}   # järjestysavain -> (piilokulmia, järjestetyt pisteet, yksinäisten id:t)
+    lasketut = {}   # (järjestys, yksinäiset) -> muodosta_karjet:n tulos ja kelpaako se muuten
     loytyi_vaihtoja = None
     for vaihtoja, jako in _suuntajaot(suunnat, yksinaiset):
         if hyvat and vaihtoja > loytyi_vaihtoja:
@@ -705,20 +753,23 @@ def _jarjesta_suorakulmaisesti(alku, valit, loppu, lidar=None):
                 jarj, yksinaiset_seinilla = _mittausjarjestys(r, karjet, keski, polku, sijoitus, suljettu)
                 if sorted(jarj) != list(range(len(pisteet))):
                     continue
-                # Yksinäisen 100-pisteen seinän suunta on oletettu suora kulma, joten muodosta_karjet:n
-                # "oletettu suora kulma" ei tee tuloksesta epäselvää (kärkien osuminen päättelyyn tarkistetaan).
                 yksin = frozenset(id(pisteet[i]) for i in yksinaiset_seinilla)
-                epaselvat = tuple(t for t in EPASELVAT_VAROITUKSET if not (yksin and t == "oletettu suora kulma"))
                 jarjestetty = [pisteet[i] for i in jarj]
-                kj, varoitukset = muodosta_karjet(jarjestetty, suljettu, lidar, yksin)
+                # Moni piilokulmavalinta tuottaa saman järjestyksen, ja muodosta_karjet riippuu vain siitä
+                if (tuple(jarj), yksin) not in lasketut:
+                    if len(lasketut) >= JARJESTYS_MAX_TARKISTUKSET:
+                        return None, "vaihtoehtoja on liikaa", frozenset()
+                    kj, varoitukset = muodosta_karjet(jarjestetty, suljettu, lidar, yksin)
+                    lasketut[tuple(jarj), yksin] = kj, not (menee_ristiin({"karjet": kj, "suljettu": suljettu})
+                                                            or any(t in v for v in varoitukset for t in epaselvat))
+                kj, kelpaa = lasketut[tuple(jarj), yksin]
+                if not kelpaa:
+                    continue
                 # muodosta_karjet laskee kulmat uudelleen pisteistä; niiden pitää osua päättelyyn
                 paatellyt = _kierretty([r[karjet[k]] if karjet[k] is not None else (keski[0][k[0]], keski[1][k[1]])
                                         for k in polku], kulma)
                 if len(kj) != len(paatellyt) or any(
                         min(math.dist(_xy(k), p) for p in paatellyt) > JARJESTYS_TARKISTUS_M for k in kj):
-                    continue
-                if menee_ristiin({"karjet": kj, "suljettu": suljettu}) or any(
-                        t in v for v in varoitukset for t in epaselvat):
                     continue
                 avain = tuple(jarj) if not suljettu else min(tuple(jarj), tuple(jarj[:1] + jarj[:0:-1]))
                 hyvat.setdefault(avain, (piiloja, jarjestetty, yksin))
