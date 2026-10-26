@@ -111,17 +111,17 @@ def viivan_tiedot(viiva):
 
 
 def muodosta(pisteet, tapa="lyhin", kantakartta=None, kantakartta_jarjestykseen=True, lidar=None,
-             lidar_paatelty=None):
+             lidar_paatelty=None, nakyvyys=True):
     """Seinälinja ja vertailut kuten sovelluksessa. kantakartta = rakennusten renkaat
     (seinalinja.py) tai None; lidar = LiDAR-seinät janoina tai None (piilokulmat, järjestys
     ja vertailu, ks. seinalinja.muodosta_seinalinjat); lidar_paatelty = DXF:n PAATELTY-taso (vain
-    järjestyksen apuna). Palauttaa {"tulos", "poikkeamat",
+    järjestyksen apuna); nakyvyys = asemapisteiden näkyvyystarkistus. Palauttaa {"tulos", "poikkeamat",
     "poikkeamat_lidar", "riskit", "lidar_aariviiva"}: tulos = muodosta_seinalinjat()-tulos,
     poikkeamat(_lidar) = poikkeamat_kantakartasta() / poikkeamat_lidarista() viivan nimen
     mukaan, riskit = kantakartan_riskit(), lidar_aariviiva = syntyikö suljettu ääriviiva."""
     tulos = sl.muodosta_seinalinjat(pisteet, tapa=tapa,
                                     kantakartta=kantakartta if kantakartta_jarjestykseen else None, lidar=lidar,
-                                    lidar_paatelty=lidar_paatelty)
+                                    lidar_paatelty=lidar_paatelty, nakyvyys=nakyvyys)
     poikkeamat, riskit = {}, []
     if kantakartta:
         poikkeamat = {p["nimi"]: p for p in sl.poikkeamat_kantakartasta(tulos, kantakartta)}

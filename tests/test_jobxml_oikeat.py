@@ -137,6 +137,18 @@ def test_osuuskunnantie60_piilokulma_yhdella_linjapisteella():
     assert not any("vinoja kulmia" in v for v in tulos["varoitukset"])
 
 
+def test_lepolantie79_nakyvyys_asemapisteilta():
+    """Automaattinen viiva (lyhin reitti, koska talossa on ~5° vino kohta) on näkyvyyden mukaan
+    kunnossa; mittausjärjestyksen väärässä viivassa näkölinjoja kulkee seinän läpi."""
+    _, pisteet, _ = jasenna("lepolantie79.jxl")
+    assert all(p["asema"]["nimi"] for p in sl.seinalinjan_pisteet(pisteet))
+    tulos = sl.muodosta_seinalinjat(pisteet)
+    assert any("Näkyvyys asemapisteiltä täsmää" in v for v in tulos["varoitukset"])
+    vaara = sl.muodosta_seinalinjat(pisteet, tapa="mittaus")
+    assert len(sl.nakolinjat_seinan_lapi(vaara["viivat"][0], vaara["pisteet"])) >= 20
+    assert any("kulkee seinälinjan läpi" in v for v in vaara["varoitukset"])
+
+
 def test_osuuskunnantie60_jarjestys_paatellaan():
     """9 piilokulmaa: järjestys päätellään seinälinjoista (ennen haku luovutti "vaihtoehtoja on
     liikaa" ja käytti lyhintä reittiä). Tulos on sama viiva kuin lyhimmällä reitillä."""

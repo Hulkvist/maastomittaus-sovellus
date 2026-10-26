@@ -1011,3 +1011,57 @@ def test_sovella_muokkaukset_suorakulmio():
     m["karjet"] = karjet((30, 0), (40, 0), (40, 5), (30, 5))
     uusi = sl.sovella_muokkaukset(tulos, [m])
     assert [v["nimi"] for v in uusi["viivat"]] == ["A", "B", "Suorakulmio 1"] and uusi["viivat"][2]["suljettu"]
+
+
+# --- Näkyvyys asemapisteiltä ---------------------------------------------------
+
+def _asemalta(p, x, y, nimi="A1", tapa="DirectReading"):
+    return dict(p, asema={"nimi": nimi, "e": E0 + x, "n": N0 + y}, method=tapa)
+
+
+def _suorakulmio_asemilta(ylaseinan_asema):
+    """10 x 6 m talo, kaikki kulmat näkyvissä. Alaseinän kulmat mitataan alapuolelta, yläseinän
+    kulmat asemalta ylaseinan_asema."""
+    return [_asemalta(piste("1", "8", 0, 0), 5, -8), _asemalta(piste("2", "5", 10, 0), 5, -8),
+            _asemalta(piste("3", "5", 10, 6), *ylaseinan_asema), _asemalta(piste("4", "5", 0, 6), *ylaseinan_asema)]
+
+
+def test_nakyvyys_tasmaa():
+    tulos = sl.muodosta_seinalinjat(_suorakulmio_asemilta((5, 14)))
+    v = tulos["viivat"][0]
+    assert sl.nakolinjat_seinan_lapi(v, tulos["pisteet"]) == []
+    assert not any("Näkölinja" in w for w in tulos["varoitukset"])
+
+
+def test_nakyvyys_seinan_lapi():
+    # yläseinän kulmat "mitattu" talon alapuolelta: näkölinjat kulkevat alaseinän läpi
+    tulos = sl.muodosta_seinalinjat(_suorakulmio_asemilta((5, -8)))
+    v = tulos["viivat"][0]
+    assert sorted(sl.nakolinjat_seinan_lapi(v, tulos["pisteet"])) == [("3", "A1"), ("4", "A1")]
+    assert any("Näkölinja asemalta pisteeseen kulkee seinälinjan läpi: piste" in w for w in tulos["varoitukset"])
+    # pois kytkettynä (esim. pelkkä sokkeli) ei varoitusta
+    tulos = sl.muodosta_seinalinjat(_suorakulmio_asemilta((5, -8)), nakyvyys=False)
+    assert not any("Näkölinja" in w for w in tulos["varoitukset"])
+
+
+def test_nakyvyys_asema_talon_sisalla():
+    tulos = sl.muodosta_seinalinjat(_suorakulmio_asemilta((5, 3)))
+    assert len(sl.nakolinjat_seinan_lapi(tulos["viivat"][0], tulos["pisteet"])) == 2
+
+
+def test_nakyvyys_hipaisu_ja_tapa():
+    pisteet = _suorakulmio_asemilta((5, 14))
+    # kulma 2 asemalta, jonka näkölinja ylittää yläseinän 5 cm kulmasta 3: hipaisu, ei rike
+    pisteet[1] = _asemalta(piste("2", "5", 10, 0), 9.9, 12)
+    tulos = sl.muodosta_seinalinjat(pisteet)
+    assert sl.nakolinjat_seinan_lapi(tulos["viivat"][0], tulos["pisteet"]) == []
+    # 20 cm kulmasta: seinän läpi
+    pisteet[1] = _asemalta(piste("2", "5", 10, 0), 9.6, 12)
+    tulos = sl.muodosta_seinalinjat(pisteet)
+    assert sl.nakolinjat_seinan_lapi(tulos["viivat"][0], tulos["pisteet"]) == [("2", "A1")]
+    # siirtomittaus (ei tähdätty suoraan) ja piste ilman asemaa ohitetaan
+    pisteet = _suorakulmio_asemilta((5, -8))
+    pisteet[2] = _asemalta(pisteet[2], 5, -8, tapa="DistanceOffset")
+    del pisteet[3]["asema"]
+    tulos = sl.muodosta_seinalinjat(pisteet)
+    assert sl.nakolinjat_seinan_lapi(tulos["viivat"][0], tulos["pisteet"]) == []
