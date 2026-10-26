@@ -559,6 +559,7 @@ def _seinalinjan_valmistelu(kaikki_pisteet, raaka_bytes):
     s = {"tulos": None, "tila": None, "muuttui": False, "virhe": None}
     kantakartta, s["kantakartta_virhe"], s["helsingissa"] = _seinalinjan_kantakartta(kaikki_pisteet)
     s["kantakartta"] = kantakartta if st.session_state.get("seinalinja_kantakartta", True) else None
+    s["nakyvyys"] = st.session_state.get("seinalinja_nakyvyys", True)
     s["lidar"], s["lidar_virhe"] = _seinalinjan_lidar()
     s["lidar_seinat"] = s["lidar"]["SEINA"] if s["lidar"] and s["lidar"]["SEINA"] else None
     s["lidar_paatelty"] = s["lidar"].get("PAATELTY") if s["lidar"] else None   # vain järjestyksen apuna
@@ -566,6 +567,7 @@ def _seinalinjan_valmistelu(kaikki_pisteet, raaka_bytes):
         tulos = jx.muodosta_seinalinja(
             kaikki_pisteet, tapa=SEINALINJAN_JARJESTYS.get(st.session_state.get("seinalinja_tapa"), "lyhin"),
             kantakartta=s["kantakartta"], lidar=s["lidar_seinat"], lidar_paatelty=s["lidar_paatelty"],
+            nakyvyys=s["nakyvyys"],
         )
         s["tila"] = tila = _seinalinjan_muokkaukset(raaka_bytes)
         pohja = sl.viivojen_tunniste(tulos)
@@ -845,6 +847,10 @@ def _seinalinja_osio(s, kaikki_pisteet, job_nimi):
                              "se otetaan Helsingin kantakartan talosta, ja poikkeamasta kartan taloon varoitetaan.")
             if s["kantakartta_virhe"]:
                 st.caption(f"Kantakartan rakennuksia ei saatu ({s['kantakartta_virhe']}) -- jatketaan ilman niitä.")
+        st.checkbox("Tarkista näkyvyys asemapisteiltä", value=True, key="seinalinja_nakyvyys",
+                    help="Takymetri näkee mittaamansa pisteen, joten näkölinja asemalta pisteeseen ei voi kulkea "
+                         "seinän läpi. Jos kulkee, viivasta varoitetaan. Viivaan tämä ei vaikuta. Ota pois, jos "
+                         "seiniä ei vielä ole (esim. sijaintikatselmus, pelkkä sokkeli).")
         st.file_uploader(
             "LiDAR-seinät (kokeilu): keilauksen _seinat.dxf", type=["dxf"], key="seinalinja_lidar",
             help="Lidar-repon lidarpipen seinälinja-DXF (SEINA-taso). Piilokulman seinän suunta otetaan "

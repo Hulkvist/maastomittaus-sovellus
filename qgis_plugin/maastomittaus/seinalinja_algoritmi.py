@@ -71,6 +71,7 @@ class SeinalinjaJxlAlgoritmi(QgsProcessingAlgorithm):
     RAKENNUKSET = "RAKENNUKSET"
     HAE_HELSINKI = "HAE_HELSINKI"
     KANTAKARTTA_JARJESTYKSEEN = "KANTAKARTTA_JARJESTYKSEEN"
+    NAKYVYYS = "NAKYVYYS"
     LIDAR = "LIDAR"
     PISTEPILVI = "PISTEPILVI"
     LUOKAT = "LUOKAT"
@@ -123,6 +124,9 @@ class SeinalinjaJxlAlgoritmi(QgsProcessingAlgorithm):
             defaultValue=True))
         self.addParameter(QgsProcessingParameterBoolean(
             self.KANTAKARTTA_JARJESTYKSEEN, "Käytä kantakarttaa järjestyksen apuna (Automaattinen)",
+            defaultValue=True))
+        self.addParameter(QgsProcessingParameterBoolean(
+            self.NAKYVYYS, "Tarkista näkyvyys asemapisteiltä (pois, jos seiniä ei vielä ole, esim. pelkkä sokkeli)",
             defaultValue=True))
         self.addParameter(QgsProcessingParameterFile(
             self.LIDAR, "LiDAR-seinät (valinnainen, lidarpipen _seinat.dxf)",
@@ -215,7 +219,8 @@ class SeinalinjaJxlAlgoritmi(QgsProcessingAlgorithm):
         tapa = ydin.TAVAT[self.parameterAsEnum(parameters, self.TAPA, context)][1]
         tulokset = ydin.muodosta(pisteet, tapa, kantakartta,
                                  self.parameterAsBoolean(parameters, self.KANTAKARTTA_JARJESTYKSEEN, context), lidar,
-                                 lidar_tasot.get(ld.PAATELTY))
+                                 lidar_tasot.get(ld.PAATELTY),
+                                 self.parameterAsBoolean(parameters, self.NAKYVYYS, context))
         tulos, poikkeamat, poikkeamat_lidar = tulokset["tulos"], tulokset["poikkeamat"], tulokset["poikkeamat_lidar"]
         if lidar:
             feedback.pushInfo("LiDAR-seinistä syntyi suljettu ääriviiva (käytetään järjestyksen apuna)."

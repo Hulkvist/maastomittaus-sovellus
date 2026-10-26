@@ -385,14 +385,14 @@ def piirra_yleiskartta(pisteet, out_path):
     return hk.piirra_jobxml_yleiskartta(pisteet, out_path)
 
 
-def muodosta_seinalinja(pisteet, tapa="lyhin", kantakartta=None, lidar=None, lidar_paatelty=None):
+def muodosta_seinalinja(pisteet, tapa="lyhin", kantakartta=None, lidar=None, lidar_paatelty=None, nakyvyys=True):
     """Seinälinja koodien 8/5/100 perusteella (ks. seinalinja.py).
     pisteet on jasenna_tyo():n toinen paluuarvo, tapa "lyhin" (automaattinen),
     "lyhin_vanha" tai "mittaus". kantakartta = hk.rakennusten_renkaat(...) (Helsinki).
     lidar = LiDAR-seinät janoina (seinalinja.lue_lidar_dxf()["SEINA"]) tai None; lidar_paatelty =
-    saman DXF:n PAATELTY-taso (vain järjestyksen apuna)."""
+    saman DXF:n PAATELTY-taso (vain järjestyksen apuna); nakyvyys = asemapisteiden näkyvyystarkistus."""
     return sl.muodosta_seinalinjat(pisteet, tapa=tapa, kantakartta=kantakartta, lidar=lidar,
-                                   lidar_paatelty=lidar_paatelty)
+                                   lidar_paatelty=lidar_paatelty, nakyvyys=nakyvyys)
 
 
 # ---------------------------------------------------------------------------
@@ -1298,6 +1298,14 @@ def jasenna_tyo(tiedosto_bytes, lahdetiedosto="tuntematon.xml"):
             "laatu": asemapisteen_laatu,
             "aikaleima": a["aikaleima"],
         })
+
+    # --- Asema, jolta piste on mitattu (seinälinjan näkyvyystarkistus) ---
+    asemat_xy = {a["station_record_id"]: a for a in asemapisteet_raaka
+                 if a["station_record_id"] and a["n"] is not None}
+    for p in pisteet_validit:
+        a = asemat_xy.get(p["station_record_id"])
+        if a and p["kategoria"] != "Asemapiste":
+            p["asema"] = {"nimi": a["nimi"], "e": a["e"], "n": a["n"]}
 
     # --- MML:n 2x-sääntö ---
     varoitukset_2x = []

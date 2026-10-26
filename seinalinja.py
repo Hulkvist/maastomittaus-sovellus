@@ -94,6 +94,9 @@ LIDAR_PEITTO_KULMA_ASTE = 20.0  # poikkeamavertailu: vain seinälinjan suuntaise
 POIKKEAMALUOKAT = [(0.05, "alle 5 cm", "#2ca02c"), (0.15, "5–15 cm", "#ffbf00"), (math.inf, "yli 15 cm", "#d62728")]
 LIDAR_YHDISTA_ASTE = 10.0     # ääriviiva: saman seinän pätkät (suunta ja päiden sivuttaisero LIDAR_PISTE_RAJA_M)
 LIDAR_YHDISTA_VALI_M = 5.0    # ääriviiva: saman seinän pätkien suurin aukko (ovi, kasvillisuus)
+NAKYVYYS_PAA_M = 0.15         # näkölinjaa asemalta pisteeseen lyhennetään pisteen päästä (prisma nurkassa)
+NAKYVYYS_KULMA_M = 0.10       # näkölinja kärjen vieressä on hipaisu, ei seinän läpi
+NAKYVYYS_TAVAT = {"DirectReading", "MeanTurnedAngle", "HorizontalAngleOffset"}   # piste tähdätty suoraan
 
 
 # ---------------------------------------------------------------------------
@@ -1993,6 +1996,57 @@ def _janat_leikkaavat(p1, p2, q1, q2):
     return d1 * d2 < 0 and d3 * d4 < 0
 
 
+def nakolinjat_seinan_lapi(viiva, pisteet):
+    """Takymetri näkee mittaamansa pisteen, joten näkölinja asemalta pisteeseen ei voi kulkea
+    viivan seinän läpi (paitsi esim. pelkän sokkelin yli). pisteet = viivan omat pisteet; mukana
+    vain suoraan tähdätyt, joilla on asema (jobxml_tuonti: p["asema"]). Asema suljetun viivan
+    sisällä on myös rike. Palauttaa [(pisteen nimi, aseman nimi)]."""
+    xy = viivan_pisteet(viiva)
+    if len(xy) < 2:
+        return []
+    reunat = list(zip(xy, xy[1:]))
+    karjet = [(k["e"], k["n"]) for k in viiva["karjet"]]
+    rikkeet = []
+    for p in pisteet:
+        asema = p.get("asema")
+        if not asema or p.get("method") not in NAKYVYYS_TAVAT:
+            continue
+        s, q = (asema["e"], asema["n"]), _xy(p)
+        if viiva["suljettu"] and _sisalla(s, xy):
+            rikkeet.append((p.get("nimi"), asema["nimi"]))
+            continue
+        d = math.dist(s, q)
+        if d <= 2 * NAKYVYYS_PAA_M:
+            continue
+        q = (q[0] + (s[0] - q[0]) * NAKYVYYS_PAA_M / d, q[1] + (s[1] - q[1]) * NAKYVYYS_PAA_M / d)
+        for a, b in reunat:
+            x = _janojen_leikkaus(s, q, a, b)
+            if x is not None and min(math.dist(x, k) for k in karjet) > NAKYVYYS_KULMA_M:
+                rikkeet.append((p.get("nimi"), asema["nimi"]))
+                break
+    return rikkeet
+
+
+def _janojen_leikkaus(p1, p2, q1, q2):
+    """Janojen leikkauspiste, jos ne menevät aidosti ristiin, muuten None."""
+    if not _janat_leikkaavat(p1, p2, q1, q2):
+        return None
+    d1 = (q2[0] - q1[0]) * (p1[1] - q1[1]) - (q2[1] - q1[1]) * (p1[0] - q1[0])
+    d2 = (q2[0] - q1[0]) * (p2[1] - q1[1]) - (q2[1] - q1[1]) * (p2[0] - q1[0])
+    t = d1 / (d1 - d2)
+    return (p1[0] + (p2[0] - p1[0]) * t, p1[1] + (p2[1] - p1[1]) * t)
+
+
+def _sisalla(piste, rengas):
+    """Onko piste renkaan sisällä (parillisuussääntö)."""
+    x, y = piste
+    sisalla = False
+    for (x1, y1), (x2, y2) in zip(rengas, rengas[1:] + rengas[:1]):
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            sisalla = not sisalla
+    return sisalla
+
+
 def menee_ristiin(viiva):
     """Leikkaako viiva (kaaret tihennettyinä) itsensä."""
     pisteet = viivan_pisteet(viiva)
@@ -2103,7 +2157,7 @@ def _lyhin_tarkistettuna(jakso, lidar=None):
 # Pääfunktio
 # ---------------------------------------------------------------------------
 
-def muodosta_seinalinjat(pisteet, tapa="lyhin", kantakartta=None, lidar=None, lidar_paatelty=None):
+def muodosta_seinalinjat(pisteet, tapa="lyhin", kantakartta=None, lidar=None, lidar_paatelty=None, nakyvyys=True):
     """pisteet = jobxml_tuonti.jasenna_tyo():n toinen paluuarvo (mittausjärjestyksessä).
     tapa = "lyhin" (automaattinen), "lyhin_vanha" (lyhin reitti ilman päättelyä
     seinälinjoista) tai "mittaus". kantakartta = rakennusten renkaat (ks. "Kantakartta
@@ -2116,7 +2170,10 @@ def muodosta_seinalinjat(pisteet, tapa="lyhin", kantakartta=None, lidar=None, li
     SEINA-taso): piilokulman seinän suunta otetaan niistä suoran kulman oletuksen sijaan, ja jos
     seinistä syntyy suljettu ääriviiva (lidar_aariviivat), automaattinen järjestys otetaan siitä,
     kun sitä ei voi päätellä seinälinjoista (ennen kantakarttaa). lidar_paatelty = DXF:n PAATELTY-taso
-    (lidarpipen ääriviivan päätellyt osat): vain ääriviivaan, ei piilokulmiin.
+    (lidarpipen ääriviivan päätellyt osat): vain ääriviivaan, ei piilokulmiin. nakyvyys = valmis
+    viiva tarkistetaan asemapisteiltä (nakolinjat_seinan_lapi): seinän läpi kulkevasta näkölinjasta
+    varoitetaan, ja jos viivasta on jo varoitus, kerrotaan, että näkyvyys täsmää. Viivaan se ei vaikuta.
+    Pois, jos seiniä ei vielä ole (esim. sijaintikatselmus, pelkkä sokkeli).
 
     Palauttaa {"viivat": [{"karjet": [...], "suljettu": bool, "numero": viivan numero,
                            "avain": viivan_avain, "nimi": viivan_nimi}],
@@ -2167,6 +2224,22 @@ def muodosta_seinalinjat(pisteet, tapa="lyhin", kantakartta=None, lidar=None, li
         for p in [j["alku"]] + j["valit"] + [j["loppu"]]:
             if not any(p is k for k in kaytetyt):
                 kaytetyt.append(p)
+
+    for viiva in viivat if nakyvyys else []:
+        omat = [p for p in kaytetyt if viivan_avain(p) == viiva["avain"]]
+        etuliite = f"{viiva['nimi']}: " if monta else ""
+        rikkeet = nakolinjat_seinan_lapi(viiva, omat)
+        if rikkeet:
+            varoitukset.append(
+                etuliite + "Näkölinja asemalta pisteeseen kulkee seinälinjan läpi: "
+                + ", ".join(f"piste {p} (asema {a})" for p, a in rikkeet[:5])
+                + (f" ja {len(rikkeet) - 5} muuta" if len(rikkeet) > 5 else "")
+                + ". Viiva on luultavasti väärin; tarkista se. (Jos seiniä ei vielä ole, esim. pelkkä sokkeli, "
+                "ota näkyvyystarkistus pois.)")
+        elif any(p.get("asema") and p.get("method") in NAKYVYYS_TAVAT for p in omat) and any(
+                "arkista" in v and v.startswith(etuliite) for v in varoitukset):
+            varoitukset.append(etuliite + "Näkyvyys asemapisteiltä täsmää: yksikään näkölinja ei kulje "
+                               "seinälinjan läpi.")
 
     return {"viivat": viivat, "pisteet": kaytetyt, "pois_jatetyt": pois_jatetyt, "varoitukset": varoitukset}
 
