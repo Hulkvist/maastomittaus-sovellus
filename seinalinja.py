@@ -50,7 +50,7 @@ esim. QGIS:n Python-ympäristössä)
 """
 
 import math
-from itertools import combinations
+from itertools import combinations, product
 
 KOODI_ALKU_LOPPU = 8
 KOODI_KULMA = 5
@@ -74,6 +74,7 @@ JARJESTYS_KULMA_ASTE = 1.5
 JARJESTYS_TARKISTUS_M = 0.5    # muodosta_karjet:n kärjen suurin etäisyys päätellystä kärjestä
 JARJESTYS_MAX_PIILOKULMAT = 6  # piilokulmia yhdellä seinälinjalla enintään
 JARJESTYS_MAX_KOKEILUT = 200000  # järjestyksen päättelyn työmäärän yläraja (piilokulmavalintojen kokeilut)
+JARJESTYS_MAX_YKSINAISET = 6   # seiniä, joilta vain yksi 100-piste, enintään (suunnat kokeillaan 2^n)
 KANTAKARTTA_RAJA_M = 1.0      # mitatun pisteen suurin etäisyys kantakartan talon reunasta
 KANTAKARTTA_VINO_ASTE = 5.0   # kantakartan talon kulma poikkeaa suorasta -> riski
 KANTAKARTTA_MIN_ALA_M2 = 2.0  # pienemmät kartan kohteet (esim. pylväs talon vieressä) eivät ole taloja
@@ -574,12 +575,13 @@ def _kierros(naapurit, alku, loppu):
 
 def _mittausjarjestys(r, karjet, keski, polku, sijoitus, suljettu):
     """Kärkiketju -> mitattujen pisteiden järjestys: mitatut kärjet ja niiden välissä seinän
-    100-pisteet seinää pitkin. Piilokulmat jäävät pois (muodosta_karjet laskee ne)."""
+    100-pisteet seinää pitkin. Piilokulmat jäävät pois (muodosta_karjet laskee ne). Palauttaa
+    (järjestys, yksinäiset): yksinäiset = 100-pisteet, jotka ovat seinällään ainoa mitattu piste."""
     def xy(k):
         i = karjet[k]
         return r[i] if i is not None else (keski[0][k[0]], keski[1][k[1]])
 
-    jarj = []
+    jarj, yksinaiset = [], set()
     for k1, k2 in zip(polku, polku[1:] + ([polku[0]] if suljettu else [])):
         if karjet[k1] is not None:
             jarj.append(karjet[k1])
@@ -592,16 +594,20 @@ def _mittausjarjestys(r, karjet, keski, polku, sijoitus, suljettu):
                     if a == akseli and abs(r[i][akseli] - (p1[akseli] + p2[akseli]) / 2) <= tol
                     and ala < r[i][muu] < yla]
         jarj.extend(sorted(seinalla, key=lambda i: abs(r[i][muu] - p1[muu])))
+        if len(seinalla) == 1 and karjet[k1] is None and karjet[k2] is None:
+            yksinaiset.add(seinalla[0])
     if not suljettu:
         jarj.append(karjet[polku[-1]])
-    return jarj
+    return jarj, yksinaiset
 
 
 def _suuntavaihtoehdot(r, sata):
     """Jokaisen 100-pisteen mahdolliset seinän suunnat (akseli, jolla on toinen piste samalla
-    linjalla, _samalla_linjalla) parhaasta huonoimpaan, tai None jos pisteellä ei ole linjakumppania."""
-    tulos = []
-    for i in sata:
+    linjalla, _samalla_linjalla) parhaasta huonoimpaan. Yksinäisellä pisteellä (ei linjakumppania,
+    seinältä mitattu vain yksi piste) seinä voi olla kumman tahansa suuntainen: suunta on suora
+    kulma viereisiin seiniin nähden. Palauttaa (vaihtoehdot, yksinäisten paikat listassa)."""
+    tulos, yksinaiset = [], set()
+    for n, i in enumerate(sata):
         poikkeamat = []
         for akseli in (0, 1):
             suhteet = [abs(r[j][akseli] - r[i][akseli]) / _linjatoleranssi(abs(r[j][1 - akseli] - r[i][1 - akseli]))
@@ -609,23 +615,35 @@ def _suuntavaihtoehdot(r, sata):
             if min(suhteet) <= 1:
                 poikkeamat.append((min(suhteet), akseli))
         if not poikkeamat:
-            return None
+            yksinaiset.add(n)
+            poikkeamat = [(0, 0), (0, 1)]
+        elif len(poikkeamat) == 1:
+            # Linjakumppani voi olla sattumaa (toisen seinän piste osuu samalle linjalle), joten
+            # viimeisenä vaihtoehtona piste on yksinäinen toisensuuntaisella seinällä
+            poikkeamat.append((math.inf, 1 - poikkeamat[0][1]))
         tulos.append([a for _, a in sorted(poikkeamat)])
-    return tulos
+    return tulos, yksinaiset
 
 
-def _suuntajaot(vaihtoehdot, max_vaihdot=2):
-    """Suuntajaot niin, että ensin kaikki parhaat, sitten yksi vaihdettu, sitten kaksi."""
-    moniselitteiset = [n for n, v in enumerate(vaihtoehdot) if len(v) > 1]
+def _suuntajaot(vaihtoehdot, yksinaiset=(), max_vaihdot=2):
+    """Suuntajaot niin, että ensin kaikki parhaat, sitten yksi vaihdettu, sitten kaksi.
+    Yksinäisten 100-pisteiden suunnat käydään joka tasolla läpi kaikkina yhdistelminä."""
+    moniselitteiset = [n for n, v in enumerate(vaihtoehdot) if len(v) > 1 and n not in yksinaiset]
+    yksinaiset = sorted(yksinaiset)
     for vaihtoja in range(0, min(max_vaihdot, len(moniselitteiset)) + 1):
         for vaihdetut in combinations(moniselitteiset, vaihtoja):
-            yield vaihtoja, [v[1] if n in vaihdetut else v[0] for n, v in enumerate(vaihtoehdot)]
+            jako = [v[1] if n in vaihdetut else v[0] for n, v in enumerate(vaihtoehdot)]
+            for suunnat in product((0, 1), repeat=len(yksinaiset)):
+                for n, a in zip(yksinaiset, suunnat):
+                    jako[n] = a
+                yield vaihtoja, list(jako)
 
 
 def jarjesta_suorakulmaisesti(alku, valit, loppu, lidar=None):
     """Pisteiden järjestys seinälinjoista: suorakulmaisessa talossa jokaisesta kulmasta lähtee
     yksi seinä pääsuunnassa ja yksi sitä vastaan kohtisuoraan, ja jokainen 100-piste on
-    pysty- tai vaakaseinällä, jolla on ainakin yksi toinen piste. Piilokulmat ovat pysty- ja
+    pysty- tai vaakaseinällä, jolla on yleensä ainakin yksi toinen piste (yksinäisen 100-pisteen
+    seinän kummatkin suunnat kokeillaan, ks. _suuntavaihtoehdot). Piilokulmat ovat pysty- ja
     vaakalinjojen leikkauspisteitä; niitä valitaan niin vähän kuin mahdollista. Järjestys ei
     riipu mittausjärjestyksestä. Avoimen viivan päillä on vain yksi seinä; kummankin pään
     suunta kokeillaan. Tulos tarkistetaan muodosta_karjet:lla (sen laskemien kulmien pitää
@@ -634,11 +652,17 @@ def jarjesta_suorakulmaisesti(alku, valit, loppu, lidar=None):
 
     Palauttaa (järjestetyt pisteet, None), (None, syy) jos päättely ei onnistu, tai
     (None, None) jos sitä ei voi käyttää (jaksossa 4-pisteitä tai alle 3 pistettä)."""
+    return _jarjesta_suorakulmaisesti(alku, valit, loppu, lidar)[:2]
+
+
+def _jarjesta_suorakulmaisesti(alku, valit, loppu, lidar=None):
+    """jarjesta_suorakulmaisesti; kolmantena paluuarvona yksinäisten 100-pisteiden id:t
+    (muodosta_karjet:n yksinaiset), jotta kärjet lasketaan samoin kuin tarkistuksessa."""
     suljettu = alku is loppu
     pisteet = [alku] + list(valit) + ([] if suljettu else [loppu])
     koodit = [koodi_numeroksi(p.get("koodi")) for p in pisteet]
     if len(pisteet) < 3 or any(k not in (KOODI_ALKU_LOPPU, KOODI_KULMA, KOODI_LINJA) for k in koodit):
-        return None, None
+        return None, None, frozenset()
     xy = [_xy(p) for p in pisteet]
     kulma = _paasuunta(xy)
     r = _kierretty(xy, -kulma)
@@ -646,16 +670,18 @@ def jarjesta_suorakulmaisesti(alku, valit, loppu, lidar=None):
     sata = [i for i, k in enumerate(koodit) if k == KOODI_LINJA]
     viimeinen = len(pisteet) - 1
 
-    suunnat = _suuntavaihtoehdot(r, sata)
-    if suunnat is None:
-        return None, "100-piste ei ole samalla seinälinjalla minkään muun pisteen kanssa"
+    suunnat, yksinaiset = _suuntavaihtoehdot(r, sata)
+    if len(yksinaiset) > JARJESTYS_MAX_YKSINAISET:
+        return None, (f"{len(yksinaiset)} seinältä on mitattu vain yksi 100-piste (enintään "
+                      f"{JARJESTYS_MAX_YKSINAISET} voidaan päätellä)"), frozenset()
     paa_vaihtoehdot = [{}] if suljettu else [{0: a, viimeinen: b} for a in (0, 1) for b in (0, 1)]
 
     budjetti = [JARJESTYS_MAX_KOKEILUT]
     erillisia = False
-    hyvat = {}   # järjestysavain -> (piilokulmia, järjestetyt pisteet)
-    for vaihtoja, jako in _suuntajaot(suunnat):
-        if hyvat:
+    hyvat = {}   # järjestysavain -> (piilokulmia, järjestetyt pisteet, yksinäisten id:t)
+    loytyi_vaihtoja = None
+    for vaihtoja, jako in _suuntajaot(suunnat, yksinaiset):
+        if hyvat and vaihtoja > loytyi_vaihtoja:
             break   # vähemmillä vaihdoilla löytyi jo ratkaisu
         sijoitus = dict(zip(sata, jako))
         for paat in paa_vaihtoehdot:
@@ -667,7 +693,7 @@ def jarjesta_suorakulmaisesti(alku, valit, loppu, lidar=None):
                 except StopIteration:
                     break
                 except ValueError:
-                    return None, "vaihtoehtoja on liikaa"
+                    return None, "vaihtoehtoja on liikaa", frozenset()
                 piiloja = sum(1 for i in karjet.values() if i is None)
                 if loytyi_taso is not None and piiloja > loytyi_taso:
                     break
@@ -676,11 +702,15 @@ def jarjesta_suorakulmaisesti(alku, valit, loppu, lidar=None):
                 if polku is None:
                     erillisia = erillisia or (suljettu and all(len(v) == 2 for v in naapurit.values()))
                     continue
-                jarj = _mittausjarjestys(r, karjet, keski, polku, sijoitus, suljettu)
+                jarj, yksinaiset_seinilla = _mittausjarjestys(r, karjet, keski, polku, sijoitus, suljettu)
                 if sorted(jarj) != list(range(len(pisteet))):
                     continue
+                # Yksinäisen 100-pisteen seinän suunta on oletettu suora kulma, joten muodosta_karjet:n
+                # "oletettu suora kulma" ei tee tuloksesta epäselvää (kärkien osuminen päättelyyn tarkistetaan).
+                yksin = frozenset(id(pisteet[i]) for i in yksinaiset_seinilla)
+                epaselvat = tuple(t for t in EPASELVAT_VAROITUKSET if not (yksin and t == "oletettu suora kulma"))
                 jarjestetty = [pisteet[i] for i in jarj]
-                kj, varoitukset = muodosta_karjet(jarjestetty, suljettu, lidar)
+                kj, varoitukset = muodosta_karjet(jarjestetty, suljettu, lidar, yksin)
                 # muodosta_karjet laskee kulmat uudelleen pisteistä; niiden pitää osua päättelyyn
                 paatellyt = _kierretty([r[karjet[k]] if karjet[k] is not None else (keski[0][k[0]], keski[1][k[1]])
                                         for k in polku], kulma)
@@ -688,20 +718,21 @@ def jarjesta_suorakulmaisesti(alku, valit, loppu, lidar=None):
                         min(math.dist(_xy(k), p) for p in paatellyt) > JARJESTYS_TARKISTUS_M for k in kj):
                     continue
                 if menee_ristiin({"karjet": kj, "suljettu": suljettu}) or any(
-                        t in v for v in varoitukset for t in EPASELVAT_VAROITUKSET):
+                        t in v for v in varoitukset for t in epaselvat):
                     continue
                 avain = tuple(jarj) if not suljettu else min(tuple(jarj), tuple(jarj[:1] + jarj[:0:-1]))
-                hyvat.setdefault(avain, (piiloja, jarjestetty))
+                hyvat.setdefault(avain, (piiloja, jarjestetty, yksin))
                 loytyi_taso = piiloja
+                loytyi_vaihtoja = vaihtoja
     if not hyvat:
         if erillisia:
-            return None, "pisteistä muodostuu useampi erillinen rengas (kaksi taloa tai sisäpiha?)"
-        return None, "kulmia ja 100-pisteitä ei saatu seinälinjoiksi"
-    vahiten = min(p for p, _ in hyvat.values())
-    parhaat = [j for p, j in hyvat.values() if p == vahiten]
+            return None, "pisteistä muodostuu useampi erillinen rengas (kaksi taloa tai sisäpiha?)", frozenset()
+        return None, "kulmia ja 100-pisteitä ei saatu seinälinjoiksi", frozenset()
+    vahiten = min(p for p, _, _ in hyvat.values())
+    parhaat = [(j, y) for p, j, y in hyvat.values() if p == vahiten]
     if len(parhaat) > 1:
-        return None, "seinälinjoista löytyi useampi mahdollinen järjestys"
-    return parhaat[0], None
+        return None, "seinälinjoista löytyi useampi mahdollinen järjestys", frozenset()
+    return parhaat[0][0], None, parhaat[0][1]
 
 
 def _vinot_kulmat(karjet, suljettu, raja_aste=10.0):
@@ -1339,11 +1370,14 @@ def _lidar_suunta(piste, tunnettu, janat):
     return (sx, sy), poikkeama
 
 
-def _arvioi_jako(pts, ryhmat, alku_kiintea, loppu_kiintea, edellinen_xy, seuraava_xy, lidar=None):
+def _arvioi_jako(pts, ryhmat, alku_kiintea, loppu_kiintea, edellinen_xy, seuraava_xy, lidar=None, yksinaiset=()):
     viimeinen = len(ryhmat) - 1
     for j, g in enumerate(ryhmat):
         if len(g) == 1:
-            if not ((j == 0 and alku_kiintea) or (j == viimeinen and loppu_kiintea)):
+            # Yksinäinen piste keskellä (seinältä mitattu vain yksi linjapiste) käy, jos sen
+            # yksinäisten jonon molemmin puolin on seinä, jolta on vähintään kaksi pistettä
+            if not ((j == 0 and alku_kiintea) or (j == viimeinen and loppu_kiintea)
+                    or (g[0] in yksinaiset and 0 < j < viimeinen)):
                 return None
         elif _suurin_poikkeama([pts[i] for i in g])[0] > LINJA_TOLERANSSI_M:
             return None
@@ -1352,6 +1386,35 @@ def _arvioi_jako(pts, ryhmat, alku_kiintea, loppu_kiintea, edellinen_xy, seuraav
     yksin_alku, yksin_loppu = len(ryhmat[0]) == 1, len(ryhmat[-1]) == 1
     oletus_90 = False
     lidar_poikkeamat = []
+    j = 1
+    while j < viimeinen:
+        if suorat[j] is not None:
+            j += 1
+            continue
+        # Yhden pisteen seinien jono j..k kahden tunnetun seinän välissä (uloke, syvennys, porras):
+        # suunnat vuorottelevat suorin kulmin, joten jonon pituuden pitää sopia tunnettuihin
+        # seiniin (pariton: ne ovat yhdensuuntaiset, parillinen: kohtisuorat).
+        k = j
+        while k + 1 < viimeinen and suorat[k + 1] is None:
+            k += 1
+        if suorat[j - 1] is None or suorat[k + 1] is None:
+            return None
+        (dx, dy), (fx, fy) = suorat[j - 1][1], suorat[k + 1][1]
+        risti = abs(dx * fy - dy * fx)
+        raja = math.radians(YHDENSUUNTAISUUS_RAJA_ASTE)
+        if (k - j) % 2 == 0 and risti >= math.sin(raja) or (k - j) % 2 == 1 and risti <= math.cos(raja):
+            return None
+        for m in range(j, k + 1):
+            piste = pts[ryhmat[m][0]]
+            lidarista = _lidar_suunta(piste, suorat[m - 1], lidar)
+            if lidarista:
+                suorat[m] = (piste, lidarista[0])
+                lidar_poikkeamat.append(lidarista[1])
+            else:
+                ex, ey = suorat[m - 1][1]
+                suorat[m] = (piste, (-ey, ex))
+                oletus_90 = True
+        j = k + 1
     if len(ryhmat) == 1:
         if yksin_alku:
             return None
@@ -1407,7 +1470,8 @@ def _arvioi_jako(pts, ryhmat, alku_kiintea, loppu_kiintea, edellinen_xy, seuraav
     return pisteet, {"suorat": suorat, "kulmat": kulmat, "oletus_90": oletus_90, "lidar": lidar_poikkeamat}
 
 
-def _ketjun_suorat(pts, alku_kiintea, loppu_kiintea, edellinen_xy=None, seuraava_xy=None, lidar=None):
+def _ketjun_suorat(pts, alku_kiintea, loppu_kiintea, edellinen_xy=None, seuraava_xy=None, lidar=None,
+                   yksinaiset=()):
     """Jakaa pisteketjun peräkkäisiin seinälinjoihin ja laskee niiden väliset kulmat.
 
     pts: (e, n)-parit järjestyksessä. alku_kiintea / loppu_kiintea: onko ketjun
@@ -1416,15 +1480,16 @@ def _ketjun_suorat(pts, alku_kiintea, loppu_kiintea, edellinen_xy=None, seuraava
     ja sen pisteet ovat oman seinäpätkänsä sisällä. Jaot muodostetaan vain suorista
     ryhmistä, joten mahdottomat jaot karsiutuvat heti. Paras jako on se, jonka kulmat
     ovat lähimpänä suoraa kulmaa ja jossa on vähiten kulmia. lidar = _lidar_janat()-janat
-    piilokulman seinän suunnalle (ks. _lidar_suunta).
+    piilokulman seinän suunnalle (ks. _lidar_suunta). yksinaiset = pts-indeksit, jotka saavat olla
+    keskellä ketjua yhden pisteen seinä (jarjesta_suorakulmaisesti:n päättelemät, ks. _arvioi_jako).
     Palauttaa {"suorat", "kulmat", "oletus_90", "lidar": [LiDAR-suunnan poikkeama 90°:sta]} tai None."""
     n = len(pts)
     if n > JAKO_MAX_PISTEET:
         return None
 
     def kelpaa(i, j):
-        if i == j:
-            return (i == 0 and alku_kiintea) or (j == n - 1 and loppu_kiintea)
+        if i == j:   # keskellä yksinäinen piste käy, jos naapuriseinät sallivat (_arvioi_jako)
+            return (i == 0 and alku_kiintea) or (j == n - 1 and loppu_kiintea) or (i in yksinaiset and 0 < i < n - 1)
         return _suurin_poikkeama(pts[i:j + 1])[0] <= LINJA_TOLERANSSI_M
 
     # loput[i] = loppuindeksit, joilla pisteet i..j muodostavat kelvollisen ryhmän
@@ -1436,7 +1501,8 @@ def _ketjun_suorat(pts, alku_kiintea, loppu_kiintea, edellinen_xy=None, seuraava
         alku, ryhmat = pino.pop()
         if alku == n:
             kokeiltu += 1
-            tulos = _arvioi_jako(pts, ryhmat, alku_kiintea, loppu_kiintea, edellinen_xy, seuraava_xy, lidar)
+            tulos = _arvioi_jako(pts, ryhmat, alku_kiintea, loppu_kiintea, edellinen_xy, seuraava_xy, lidar,
+                                 yksinaiset)
             if tulos is not None and (paras is None or tulos[0] < paras[0]):
                 paras = tulos
             continue
@@ -1627,7 +1693,7 @@ def _ratkaise_kaari(kaaripisteet, vasen, oikea, nimi, varoitukset):
 # Kulmapisteiden välinen osuus
 # ---------------------------------------------------------------------------
 
-def _valin_karjet(a, valit, b, karki_a, edellinen_xy, seuraava_xy, varoitukset, lidar=None):
+def _valin_karjet(a, valit, b, karki_a, edellinen_xy, seuraava_xy, varoitukset, lidar=None, yksinaiset=frozenset()):
     """Kärjet kulmapisteiden A ja B välille (ei A:ta eikä B:tä). valit = 100- ja
     4-pisteet järjestyksessä. Kaaren bulge asetetaan kaaren alkukärjelle, joka voi
     olla karki_a. Palauttaa listan kärkiä tai None, jos väliä ei saada ratkaistua."""
@@ -1644,9 +1710,11 @@ def _valin_karjet(a, valit, b, karki_a, edellinen_xy, seuraava_xy, varoitukset, 
         if laji != "linja":
             continue
         alku_k, loppu_k = i == 0, i == len(osat) - 1
-        pts = ([_xy(a)] if alku_k else []) + [_xy(p) for p in ps] + ([_xy(b)] if loppu_k else [])
+        ketju = ([a] if alku_k else []) + ps + ([b] if loppu_k else [])
+        pts = [_xy(p) for p in ketju]
         tulos = _ketjun_suorat(pts, alku_k, loppu_k,
-                               edellinen_xy if alku_k else None, seuraava_xy if loppu_k else None, lidar)
+                               edellinen_xy if alku_k else None, seuraava_xy if loppu_k else None, lidar,
+                               {k for k, p in enumerate(ketju) if id(p) in yksinaiset})
         if tulos is None:
             return None
         if tulos["oletus_90"]:
@@ -1701,7 +1769,7 @@ def _valin_karjet(a, valit, b, karki_a, edellinen_xy, seuraava_xy, varoitukset, 
     return uudet
 
 
-def muodosta_karjet(jarjestetty, suljettu, lidar=None):
+def muodosta_karjet(jarjestetty, suljettu, lidar=None, yksinaiset=frozenset()):
     """Muuttaa järjestetyn pistelistan viivan kärjiksi. Palauttaa (kärjet, varoitukset).
 
     Kahden kulman välin piilokulmat ratkaistaan viereisten seinien suunnista: edellinen seinä
@@ -1710,12 +1778,13 @@ def muodosta_karjet(jarjestetty, suljettu, lidar=None):
     seuraavana suuntana vain kulmapiste (5/8), sitten ensimmäisen kierroksen B:n jälkeinen
     kärki (voi olla laskettu piilokulma). Pelkkä B:n jälkeinen 100-piste voisi olla seuraavan
     piilokulman takana, jolloin suunta olisi vino (Osuuskunnantie 60). lidar = _lidar_janat()-janat
-    piilokulmille."""
+    piilokulmille. yksinaiset = id(piste) 100-pisteille, joiden seinältä ei ole muita pisteitä
+    (seinä kahden tunnetun välissä, suunta suorasta kulmasta; ks. _arvioi_jako)."""
     ankkurit = [i for i, p in enumerate(jarjestetty)
                 if koodi_numeroksi(p.get("koodi")) in (KOODI_ALKU_LOPPU, KOODI_KULMA)]
     if not ankkurit:
         return [], ["Jaksossa ei ole yhtään kulmapistettä (5 tai 8)."]
-    karjet, _, b_kohdat = _muodosta_karjet(jarjestetty, suljettu, ankkurit, None, lidar=lidar)
+    karjet, _, b_kohdat = _muodosta_karjet(jarjestetty, suljettu, ankkurit, None, lidar=lidar, yksinaiset=yksinaiset)
     seuraavat = []
     for kohta in b_kohdat:
         if kohta + 1 < len(karjet):
@@ -1726,11 +1795,13 @@ def muodosta_karjet(jarjestetty, suljettu, lidar=None):
             seuraavat.append(None)
     # Suljetun viivan ensimmäisen välin edellinen seinä: ensimmäisen kierroksen viimeinen kärki
     edellinen_alku = (karjet[-1]["e"], karjet[-1]["n"]) if suljettu and len(karjet) > 1 else None
-    karjet, varoitukset, _ = _muodosta_karjet(jarjestetty, suljettu, ankkurit, seuraavat, edellinen_alku, lidar)
+    karjet, varoitukset, _ = _muodosta_karjet(jarjestetty, suljettu, ankkurit, seuraavat, edellinen_alku, lidar,
+                                              yksinaiset)
     return karjet, varoitukset
 
 
-def _muodosta_karjet(jarjestetty, suljettu, ankkurit, seuraavat, edellinen_alku=None, lidar=None):
+def _muodosta_karjet(jarjestetty, suljettu, ankkurit, seuraavat, edellinen_alku=None, lidar=None,
+                     yksinaiset=frozenset()):
     """muodosta_karjet:n yksi kierros. seuraavat = välikohtainen seuraavan seinän suuntapiste
     (B:n jälkeinen kärki edelliseltä kierrokselta) tai None: silloin käytetään B:n jälkeistä
     pistettä vain, jos se on kulmapiste. edellinen_alku = suljetun viivan ensimmäisen välin
@@ -1756,7 +1827,7 @@ def _muodosta_karjet(jarjestetty, suljettu, ankkurit, seuraavat, edellinen_alku=
             if a is b:
                 # Ainoa kulmapiste: talo kierretään 8-pisteestä takaisin siihen, joten
                 # ketjun molemmat päät ovat sama kiinteä piste.
-                uudet = _valin_karjet(a, hs, b, karki_a, None, None, varoitukset, lidar)
+                uudet = _valin_karjet(a, hs, b, karki_a, None, None, varoitukset, lidar, yksinaiset)
                 if uudet is None:
                     karki_a["bulge"] = 0.0
                     varoitukset.append(
@@ -1777,7 +1848,7 @@ def _muodosta_karjet(jarjestetty, suljettu, ankkurit, seuraavat, edellinen_alku=
                     seuraava_i = ib + 1
                     seuraava = (_xy(jarjestetty[seuraava_i % n])
                                 if (seuraava_i < n or suljettu) and (seuraava_i % n) in ankkurit else None)
-                uudet = _valin_karjet(a, hs, b, karki_a, edellinen, seuraava, varoitukset, lidar)
+                uudet = _valin_karjet(a, hs, b, karki_a, edellinen, seuraava, varoitukset, lidar, yksinaiset)
                 if uudet is None:
                     karki_a["bulge"] = 0.0
                     varoitukset.append(
@@ -1910,7 +1981,7 @@ def _jakson_karjet(jakso, tapa, kantakartta=None, lidar=None, lidar_kartta=None)
         return _lyhin_tarkistettuna(jakso, lidar)
     if tapa == "lyhin":
         valin = f"{jakso['alku'].get('nimi')}-{jakso['loppu'].get('nimi')}"
-        jarjestetty, syy = jarjesta_suorakulmaisesti(jakso["alku"], jakso["valit"], jakso["loppu"], lidar)
+        jarjestetty, syy, yksin = _jarjesta_suorakulmaisesti(jakso["alku"], jakso["valit"], jakso["loppu"], lidar)
         kartan, kartan_syy = (jarjesta_kantakartan_mukaan(jakso["alku"], jakso["valit"], jakso["loppu"], kantakartta,
                                                           lidar)
                               if kantakartta else (None, None))
@@ -1918,7 +1989,8 @@ def _jakson_karjet(jakso, tapa, kantakartta=None, lidar=None, lidar_kartta=None)
                                                          lidar)
                                 if lidar_kartta else (None, None))
         if jarjestetty is not None:
-            karjet, varoitukset = muodosta_karjet(jarjestetty, suljettu=jakso["suljettu"], lidar=lidar)
+            karjet, varoitukset = muodosta_karjet(jarjestetty, suljettu=jakso["suljettu"], lidar=lidar,
+                                                  yksinaiset=yksin)
             if lidarin is not None and not _sama_jarjestys(jarjestetty, lidarin, jakso["suljettu"]):
                 varoitukset = varoitukset + [
                     f"Järjestys poikkeaa LiDAR-ääriviivasta jaksolla {valin}. Tarkista viiva."]

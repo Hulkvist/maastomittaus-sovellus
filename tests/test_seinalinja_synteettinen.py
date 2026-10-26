@@ -203,11 +203,12 @@ def test_piilokulma_yhdella_linjapisteella_seuraava_100_piste(nimi, tapa, piilot
     assert st.poikkeama(tulos, talo, muunnos) < 0.05, tulos["varoitukset"]
 
 
-@pytest.mark.parametrize("nimi", ["suorakulmio", "L", "T", "parveke", "vino", "erkkeri"])
+@pytest.mark.parametrize("nimi", ["suorakulmio", "L", "T", "parveke", "vino", "erkkeri", "U", "H"])
 def test_yhden_linjapisteen_seinat_laajasti(nimi):
     """Moni seinä yhdellä 100-pisteellä (240 mittausta talomuotoa kohden): oikeiden määrä ei
     saa laskea alle YKSI_100_ALARAJAT (kun B:n jälkeistä 100-pistettä ei käytetty lainkaan,
-    suorakulmio 164, L 110, erkkeri 115)."""
+    suorakulmio 164, L 110, erkkeri 115). Osa ei ratkea lainkaan, koska yksi seinä jätetään
+    kokonaan mittaamatta."""
     talo = TALOT[nimi]
     oikein = tapauksia = 0
     for piilotus in (0.3, 0.5, 0.7):
@@ -220,5 +221,25 @@ def test_yhden_linjapisteen_seinat_laajasti(nimi):
     assert oikein >= YKSI_100_ALARAJAT[nimi], (oikein, tapauksia)
 
 
-# Oikeat tulokset yhden kierroksen versiolla, jossa B:n jälkeinen piste oli aina suunta
-YKSI_100_ALARAJAT = {"suorakulmio": 171, "L": 111, "T": 100, "parveke": 106, "vino": 84, "erkkeri": 116}
+# Oikeat tulokset, kun yksinäisen 100-pisteen seinä päätellään suorasta kulmasta (ennen:
+# suorakulmio 175, L 112, T 100, parveke 106, U 74, H 65; vino ja erkkeri eivät ole suorakulmaisia)
+YKSI_100_ALARAJAT = {"suorakulmio": 184, "L": 155, "T": 154, "parveke": 159, "vino": 84, "erkkeri": 116,
+                     "U": 128, "H": 150}
+
+
+# Seinältä vain yksi 100-piste, eikä sillä ole linjakumppania: seinän suunta on suora kulma
+# viereisiin seiniin, ja piilokulmat ovat linjojen leikkauspisteitä. Ennen päättely hylättiin
+# ("100-piste ei ole samalla seinälinjalla...") ja lyhin reitti meni metrejä pieleen.
+@pytest.mark.parametrize("nimi, siemen, kuvaus", [
+    ("L", 7, "yksinäinen seinä kahden yhdensuuntaisen välissä (pisteet 8 ja 13)"),
+    ("suorakulmio", 24, "kaksi peräkkäistä yksinäistä seinää; piste osuu sattumalta toisen seinän linjalle"),
+])
+def test_yksinainen_100_piste_seinalla(nimi, siemen, kuvaus):
+    talo = TALOT[nimi]
+    pisteet, muunnos, _ = st.mittaa(talo, st.uusi_rng(1000 * siemen + 7), piilotus=0.6, yksi_100=0.6)
+    jakso = sl.jaa_jaksoihin(pisteet)[0][0]
+    jarjestetty, syy = sl.jarjesta_suorakulmaisesti(jakso["alku"], jakso["valit"], jakso["loppu"])
+    assert syy is None, (kuvaus, syy)
+    tulos = sl.muodosta_seinalinjat(pisteet, tapa="lyhin")
+    assert st.poikkeama(tulos, talo, muunnos) < SALLITTU_M, (kuvaus, tulos["varoitukset"])
+    assert not any("Tarkista viiva" in v for v in tulos["varoitukset"]), tulos["varoitukset"]
