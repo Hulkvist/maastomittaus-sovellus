@@ -137,6 +137,21 @@ def test_osuuskunnantie60_piilokulma_yhdella_linjapisteella():
     assert not any("vinoja kulmia" in v for v in tulos["varoitukset"])
 
 
+def test_osuuskunnantie60_jarjestys_paatellaan():
+    """9 piilokulmaa: järjestys päätellään seinälinjoista (ennen haku luovutti "vaihtoehtoja on
+    liikaa" ja käytti lyhintä reittiä). Tulos on sama viiva kuin lyhimmällä reitillä."""
+    _, pisteet, _ = jasenna("osuuskunnantie60.jxl")
+    jakso = [j for j in sl.jaa_jaksoihin(pisteet)[0] if j["suljettu"]][0]
+    jarjestetty, syy = sl.jarjesta_suorakulmaisesti(jakso["alku"], jakso["valit"], jakso["loppu"])
+    assert syy is None
+    tulos = sl.muodosta_seinalinjat(pisteet)
+    assert not any("ei voitu päätellä" in v for v in tulos["varoitukset"]), tulos["varoitukset"]
+    vanha = sl.muodosta_seinalinjat(pisteet, tapa="lyhin_vanha")
+    rak, rak_vanha = ([v for v in t["viivat"] if v["suljettu"]][0] for t in (tulos, vanha))
+    assert sorted((round(k["e"], 3), round(k["n"], 3)) for k in rak["karjet"]) == \
+        sorted((round(k["e"], 3), round(k["n"], 3)) for k in rak_vanha["karjet"])
+
+
 @pytest.mark.parametrize("nimi", sorted(os.listdir(DATA)) if os.path.isdir(DATA) else ["testi2.jxl"])
 def test_mittausraportti_pdf(nimi, monkeypatch):
     # asemien pienoiskartat hakisivat taustan verkosta; ne eivät kuulu tähän testiin
