@@ -14,7 +14,7 @@ from qgis.core import (QgsFeature, QgsFeatureSink, QgsGeometry, QgsPointXY, QgsP
                        QgsCoordinateReferenceSystem, QgsRectangle, Qgis)
 
 from . import ydin
-from .pilvi_algoritmi import PROFIILIT, _dxf_viivat, _m
+from .pilvi_algoritmi import ALS_SEINALUOKKA, PROFIILIT, _dxf_viivat, _m
 from .seinalinja_algoritmi import GK25, LUKU, TEKSTI, _cm, _kentat
 from .tyylit import aseta_tyylit
 from .vertailu_algoritmi import _gk25_alue, rajaa_pilvi
@@ -114,6 +114,8 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
                 "näkee kadun varressa myös aidat, pensasaidat ja muurit; niiden vieressä ei ole kattoa, joten "
                 "linjat, joiden pituudesta alle puolet on katon lähellä, menevät tasolle 'Kattosuodattimen "
                 "poistamat'. Luokka -1 = ei suodatinta.\n\n"
+                "Laite 'Ilmakeilauksen seinäluokka': ruuduista luetaan vain luokan 13 seinäpisteet (nopea, "
+                "tarkkuus desimetriluokkaa).\n\n"
                 "Muisti: yksi ruutu kerrallaan (tiheä katu 150 m ruudussa noin 2–3 Gt). Isompi ruutu on nopeampi "
                 "mutta vie enemmän muistia ja tilapäistä levytilaa.")
 
@@ -207,17 +209,23 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
             if katto is not None and len(xyz):
                 kattoa = luokka == kattoluokka
                 katto.lisaa(xyz[kattoa, :2] + origo[:2])
-                xyz = xyz[~kattoa]
-            del luokka
+                xyz, luokka = xyz[~kattoa], luokka[~kattoa]
             if len(xyz) < MIN_PISTEITA:
                 continue
-            xyz[:, :2] += (origo[:2] - (re, rn)).astype(np.float32)          # ruudun omiin koordinaatteihin
             if opt is None:
                 if profiili == "auto":
                     otsikosta = sp.las_profile(polku)
                     profiili = otsikosta or sp.guess_profile(xyz)
                     feedback.pushInfo(f"Laite: {profiili} ({'LAS-otsikosta' if otsikosta else 'pistetiheydestä'}).")
                 opt = sp.WallOptions.for_cloud(None, profiili)
+            if profiili == "als":
+                seina = luokka == ALS_SEINALUOKKA       # ilmakeilauksesta vain seinäluokka (jos on)
+                if seina.any():
+                    xyz = xyz[seina]
+            del luokka
+            if len(xyz) < MIN_PISTEITA:
+                continue
+            xyz[:, :2] += (origo[:2] - (re, rn)).astype(np.float32)          # ruudun omiin koordinaatteihin
             t0 = time.time()
             segs = sp.extract_walls(xyz, opt)
             loydetyt[(i, j)] = sp.tile_core(segs, (re - e0, rn - n0), koko)

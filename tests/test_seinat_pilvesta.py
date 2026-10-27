@@ -94,8 +94,9 @@ def test_interior_wall_seen_through_window_dropped():
 def test_profile_from_density_and_header(tmp_path):
     rng = np.random.default_rng(5)
     dense = np.column_stack([rng.uniform(0, 10, (3_000_000, 2)), rng.uniform(0, 3, 3_000_000)])
-    sparse = np.column_stack([rng.uniform(0, 200, (3_000_000, 2)), rng.uniform(0, 3, 3_000_000)])
-    assert guess_profile(dense) == "iphone" and guess_profile(sparse) == "stonex"
+    sparse = np.column_stack([rng.uniform(0, 50, (3_000_000, 2)), rng.uniform(0, 3, 3_000_000)])
+    als = np.column_stack([rng.uniform(0, 200, (3_000_000, 2)), rng.uniform(0, 3, 3_000_000)])
+    assert guess_profile(dense) == "iphone" and guess_profile(sparse) == "stonex" and guess_profile(als) == "als"
     assert WallOptions.for_cloud(sparse).profile == "stonex" and WallOptions.for_cloud(sparse).voxel > 0
     for system, software, expected in ((b"STONEX", b"GOpost-2.4.8.0", "stonex"), (b"iPhone LiDAR", b"lidarpipe", "iphone"),
                                        (b"PDAL", b"PDAL 2.10.2", None)):
