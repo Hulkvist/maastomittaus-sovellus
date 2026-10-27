@@ -20,7 +20,7 @@ import numpy as np
 
 @dataclass
 class WallOptions:
-    profile: str = "iphone"      # asetusten lähtökohta (for_cloud / PROFILES): iphone tai stonex
+    profile: str = "iphone"      # asetusten lähtökohta (for_cloud / PROFILES): iphone, stonex tai als
     height: float = 1.0          # vanhan vaakaleikkauksen (horizontal_slice) ja DXF:n korkeus maanpinnasta [m]
     band: float = 0.2            # ± [m]
     ground_cell: float = 2.0     # paikallisen maanpinnan ruutukoko [m]
@@ -97,11 +97,19 @@ class WallOptions:
     fence_top: float = 2.2
     fence_drop: float = 0.5
     fence_min: float = 0.75
+    # Ilmakeilauksen seinäpisteet (profiili als, extract_walls_als): als_cell-ruudussa on oltava pisteitä
+    # vähintään als_span korkeusväliltä (kattoreunan ja räystään yksittäiset pisteet pois), ja linjat
+    # yhdistetään rakennuksittain (als_group lähempänä toisiaan olevat linjat samaan ryhmään)
+    als_cell: float = 0.5
+    als_span: float = 1.5
+    als_group: float = 3.0
+    als_ground: float = 15.0     # korkeustiedon (_als_heights) paikallisen alimman seinäpisteen ruutu (3 x 3) [m]
+    als_skew_min: float = 2.0    # pääsuunnasta poikkeava (ei snapped) lyhyempi linja pois: puut, nurkkien pätkät [m]
     seed: int = 0
 
     @classmethod
     def for_cloud(cls, xyz: np.ndarray | None = None, profile: str = "auto", **kw) -> "WallOptions":
-        """Asetukset pilven mukaan: profile = iphone, stonex tai auto (pistetiheydestä, ks. guess_profile).
+        """Asetukset pilven mukaan: profile = iphone, stonex, als tai auto (pistetiheydestä, ks. guess_profile).
         kw ohittaa yksittäiset arvot."""
         if profile == "auto":
             profile = guess_profile(xyz) if xyz is not None else "iphone"
@@ -118,19 +126,25 @@ PROFILES = {
     # 30 m, Katajaharju 17 m); viidessä kohteessa suodatin pudotti seiniä yhtä paljon kuin roskaa.
     "stonex": dict(voxel=0.03, wall_cell=0.03, cover_top=2.0, cover_near=False, facade_max=3.5, inlier_tol=0.03,
                    wall_offset=0.04, outline_offset=0.06, facade_tol=0.01, bush_noise=0.0),
+    # Ilmakeilauksen seinäluokka (esim. TerraScanin luokka 13): ylhäältä harva (noin 40 pistettä seinämetrillä),
+    # seinä 2D:ssä noin 10 cm paksu viiva. Ei maanpintaa eikä julkisivun tarkennusta.
+    "als": dict(wall_cell=0.10, inlier_tol=0.10, min_density=4.0, min_length=1.0, max_gap=1.0,
+                merge_offset=0.15, wall_offset=0.25, outline_offset=0.3, refine=False),
 }
 
 
 def guess_profile(xyz: np.ndarray, sample: int = 2_000_000) -> str:
-    """iphone tai stonex pistetiheydestä, kun laitetta ei tiedetä (las_profile): iPhone keilataan läheltä,
+    """iphone, stonex tai als pistetiheydestä, kun laitetta ei tiedetä (las_profile): iPhone keilataan läheltä,
     joten pisteitä on maastossa neliömetriä kohden paljon (testikohteissa 34 000–70 000 / m² 0,5 m
-    ruuduissa), Stonexin reppukeilaimella vähemmän ja laajemmalle (5 000–10 000 / m²)."""
+    ruuduissa), Stonexin reppukeilaimella vähemmän ja laajemmalle (5 000–10 000 / m², kaupungin
+    ajoneuvokeilauksen seinäluokka noin 4 000 / m²) ja ilmakeilauksen seinäluokassa alle 100 / m²."""
     if len(xyz) == 0:
         return "iphone"
     p = xyz if len(xyz) <= sample else xyz[np.random.default_rng(0).choice(len(xyz), sample, replace=False)]
     q = np.floor(p[:, :2] / 0.5).astype(np.int64)
     cells = len(np.unique(q[:, 0] * 10**9 + q[:, 1]))
-    return "iphone" if len(xyz) / (cells * 0.25) > 20_000 else "stonex"
+    density = len(xyz) / (cells * 0.25)
+    return "iphone" if density > 20_000 else "stonex" if density > 500 else "als"
 
 
 def las_profile(path) -> str | None:
@@ -793,8 +807,16 @@ def merge_collinear(segments: list[Segment], opt: WallOptions) -> list[Segment]:
     merged = True
     while merged:
         merged = False
+        # Esikarsinta (tulos sama, vrt. merge_walls): palan b keskipiste on enintään merge_gap pituussuunnassa ja
+        # merge_offset + 0,1 sivusuunnassa palasta a
+        ends = np.array([[s.p0, s.p1] for s in segs]).reshape(-1, 2, 2)
+        box_lo, box_hi = ends.min(axis=1), ends.max(axis=1)
+        lens = np.array([s.length for s in segs])
         for i in range(len(segs)):
-            for j in range(i + 1, len(segs)):
+            gap_box = np.linalg.norm(np.maximum(0, np.maximum(box_lo[i + 1:] - box_hi[i], box_lo[i] - box_hi[i + 1:])),
+                                     axis=1)
+            reach = opt.merge_gap + opt.merge_offset + 0.1 + lens[i + 1:] / 2
+            for j in i + 1 + np.flatnonzero(gap_box <= reach):
                 a, b = segs[i], segs[j]
                 if abs(a.direction @ b.direction) < np.cos(np.radians(0.5)):
                     continue
@@ -956,8 +978,16 @@ def merge_walls(segments: list[Segment], opt: WallOptions) -> list[Segment]:
     merged = True
     while merged:
         merged = False
+        # Esikarsinta (tulos sama): yhdistettävän lyhyemmän palan keskipiste on enintään wall_gap pituussuunnassa
+        # ja wall_offset + 0,1 sivusuunnassa pidemmästä, joten rajalaatikoiden etäisyys on enintään raja alla
+        ends = np.array([[s.p0, s.p1] for s in segs]).reshape(-1, 2, 2)
+        box_lo, box_hi = ends.min(axis=1), ends.max(axis=1)
+        lens = np.array([s.length for s in segs])
         for i in range(len(segs)):
-            for j in range(i + 1, len(segs)):
+            gap_box = np.linalg.norm(np.maximum(0, np.maximum(box_lo[i + 1:] - box_hi[i], box_lo[i] - box_hi[i + 1:])),
+                                     axis=1)
+            reach = opt.wall_gap + opt.wall_offset + 0.1 + np.minimum(lens[i + 1:], lens[i]) / 2
+            for j in i + 1 + np.flatnonzero(gap_box <= reach):
                 a, b = segs[i], segs[j]
                 if b.length > a.length:
                     # Suunta pidemmästä: lyhyen palan suunta voi poiketa muutaman asteen, jolloin toisen palan
@@ -1253,10 +1283,109 @@ def _generalize(segs: list[Segment], opt: WallOptions) -> list[Segment]:
     return out
 
 
+def _cell_index(xy: np.ndarray, cell: float) -> np.ndarray:
+    """Pisteiden ruutujen järjestysnumerot 0..m-1 (np.unique)."""
+    ij = np.floor(xy / cell).astype(np.int64)
+    ij -= ij.min(0)
+    return np.unique(ij[:, 0] * (int(ij[:, 1].max()) + 1) + ij[:, 1], return_inverse=True)[1].ravel()
+
+
+def als_cells(xyz: np.ndarray, opt: WallOptions) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Ilmakeilauksen seinäpisteiden ruutujen (wall_cell) painopisteet (m x 2) sekä ruutujen alin ja ylin z.
+    Mukana vain pisteet, joiden als_cell-ruudussa korkeusväli on vähintään als_span: yksittäiset kattoreunan ja
+    räystään pisteet sekä matalat aidat jäävät pois. Korkeusväli isommasta ruudusta, koska harvalla seinällä
+    (lentolinjan suuntainen, sisäpiha) pieneen ruutuun osuu vain yksi piste."""
+    empty = (np.zeros((0, 2)), np.zeros(0), np.zeros(0))
+    if len(xyz) == 0:
+        return empty
+    inv = _cell_index(xyz[:, :2], opt.als_cell)
+    zmin, zmax = _cell_minmax(inv, xyz[:, 2])
+    xyz = xyz[(zmax - zmin)[inv] >= opt.als_span]
+    if len(xyz) == 0:
+        return empty
+    inv = _cell_index(xyz[:, :2], opt.wall_cell)
+    m = int(inv.max()) + 1
+    n = np.bincount(inv, minlength=m)
+    xy = np.column_stack([np.bincount(inv, xyz[:, 0], m) / n, np.bincount(inv, xyz[:, 1], m) / n])
+    return (xy, *_cell_minmax(inv, xyz[:, 2]))
+
+
+def _cell_minmax(inv: np.ndarray, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    m = int(inv.max()) + 1
+    zmin, zmax = np.full(m, np.inf), np.full(m, -np.inf)
+    np.minimum.at(zmin, inv, z)
+    np.maximum.at(zmax, inv, z)
+    return zmin, zmax
+
+
+def _als_heights(segs: list[Segment], xy: np.ndarray, zmin: np.ndarray, zmax: np.ndarray,
+                 opt: WallOptions) -> None:
+    """Segment.info["korkeus"] = (alin, ylin) seinäpiste paikallisesta alimmasta seinäpisteestä (als_ground
+    säteellä, ruuduittain). Ilmakeilauksen seinäluokassa ei ole maata, joten tämä on likimääräinen:
+    kattorakenteiden (IV-konehuone, porrashuone) seinien alin piste on korkealla, mutta niin on myös ahtaan
+    sisäpihan seinien, joille keilaus ei näe maahan asti."""
+    key = np.ascontiguousarray(xy).view(np.dtype((np.void, xy.dtype.itemsize * 2))).ravel()
+    order = np.argsort(key)
+    cell = opt.als_ground
+    ij = np.floor(xy / cell).astype(np.int64)
+    off = ij.min(0) - 1
+    ij -= off
+    grid = np.full(tuple(ij.max(0) + 2), np.inf)
+    np.minimum.at(grid, (ij[:, 0], ij[:, 1]), zmin)
+    low = Ground._min3(grid)
+    for s in segs:
+        if len(s.points) == 0:
+            continue
+        q = np.ascontiguousarray(s.points, dtype=xy.dtype).view(key.dtype).ravel()
+        k = order[np.clip(np.searchsorted(key[order], q), 0, len(key) - 1)]
+        k = k[key[k] == q]           # nurkkien ja porrastusten lisäpalat: ei omia ruutuja
+        if len(k) == 0:
+            continue
+        c = np.floor((s.p0 + s.p1) / 2 / cell).astype(np.int64) - off
+        c = np.clip(c, 0, np.array(low.shape) - 1)
+        ground = low[c[0], c[1]]
+        if not np.isfinite(ground):
+            ground = zmin[k].min()
+        s.info = {"korkeus": (round(float(zmin[k].min() - ground), 2), round(float(zmax[k].max() - ground), 2))}
+
+
+def extract_walls_als(xyz: np.ndarray, opt: WallOptions) -> list[Segment]:
+    """Seinälinjat ilmakeilauksen seinäpisteistä (luokiteltu seinäluokka, ks. read_wall_class): ruutujen
+    painopisteistä suorat, sitten yhdistely rakennuksittain (merge_walls vertaa kaikkia pareja, joten koko
+    kaupunginosa kerralla olisi hidas). Ei maanpintaa: linja on seinäpisteiden keskellä koko korkeudelta.
+    Segment.info["korkeus"]: ks. _als_heights."""
+    cells, zmin, zmax = als_cells(xyz, opt)
+    keep = stable_cells(cells, opt)
+    cells, zmin, zmax = cells[keep], zmin[keep], zmax[keep]
+    segs = ransac_local(cells, opt)
+    groups = _groups(segs, opt.als_group)
+    out: list[Segment] = []
+    for g in dict.fromkeys(groups):
+        part = [s for s, k in zip(segs, groups) if k == g]
+        for step in (regularize, merge_walls, close_corners, prune_short, _generalize):
+            part = step(part, opt)
+        out += outline(part, opt) if opt.outline else part
+    out = [s for s in out if s.snapped or s.length >= opt.als_skew_min]
+    _als_heights(out, cells, zmin, zmax, opt)
+    return out
+
+
+def read_wall_class(path, wall_class: int = 13) -> np.ndarray:
+    """LAS/LAZ:n pisteet (n x 3); seinäluokan pisteet, jos tiedostossa on niitä (ilmakeilaus)."""
+    import laspy
+
+    las = laspy.read(str(path))
+    xyz = np.column_stack([np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)])
+    wall = np.asarray(las.classification) == wall_class
+    return xyz[wall] if wall.any() else xyz
+
+
 def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segment]:
     """Seinälinjat pilvestä (paikalliset koordinaatit, n x 3). Lopullisilla linjoilla on Segment.info
     (wall_info), kun opt.refine."""
     opt = opt or WallOptions()
+    if opt.profile == "als":
+        return extract_walls_als(xyz, opt)
     # Maanpinta otoksesta (iso pilvi), seinäkorkeuden pisteet paloittain koko pilvestä
     sample = ground_sample(xyz)
     if opt.indoor:

@@ -29,7 +29,8 @@ SEINAKENTAT = _kentat(("taso", TEKSTI), ("pituus_m", LUKU), ("seina", TEKSTI), (
                       ("korkeus_yla_m", LUKU), ("sokkeli_cm", LUKU), ("sokkeli_yla_m", LUKU), ("pinta_cm", LUKU),
                       ("kohina_cm", LUKU), ("kallistus_cm_m", LUKU))
 PROFIILIT = [("Automaattinen (LAS-otsikosta tai pistetiheydestä)", "auto"), ("iPhone", "iphone"),
-             ("Stonex (reppukeilain)", "stonex")]
+             ("Stonex (reppukeilain)", "stonex"), ("Ilmakeilauksen seinäluokka (ALS, luokka 13)", "als")]
+ALS_SEINALUOKKA = 13
 ALUEEN_PUSKURI_M = 5.0     # rajausalueen (talot) ympäriltä luetaan myös seinien ulkopuoli
 VAROITUS_KM2 = 0.25        # isompi alue: varoitus (aika ja muisti)
 
@@ -58,8 +59,8 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
 
     def shortHelpString(self):  # noqa: N802
         return ("Tunnistaa rakennusten seinälinjat suoraan pistepilvestä (LAS tai LAZ): iPhonen keilaus "
-                "(lidarpipe) tai Stonexin reppukeilain. Laite päätellään LAS-otsikosta tai pistetiheydestä, "
-                "tai sen voi valita.\n\n"
+                "(lidarpipe), Stonexin reppukeilain tai ilmakeilauksen seinäluokka. Laite päätellään "
+                "LAS-otsikosta tai pistetiheydestä, tai sen voi valita.\n\n"
                 "Rajaus: valitse talot kartalta (esim. kantakartta, 'Vain valitut kohteet'; pistepilvestä luetaan "
                 "talot ja 5 m ympäriltä) tai piirrä alue: kentän 'alue kartalta' valikosta Piirrä kartalle ja "
                 "vedä suorakaide (myös kartan näkymä tai tason laajuus käy). Rajaus QGIS:n PDAL-työkalulla "
@@ -72,6 +73,11 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
                 "sisennykset (enintään 0,5 m syvät ja 2 m leveät) yleistetään pois. Ikkunoista näkyvät "
                 "sisäseinät jäävät pois, eikä linja jatku nurkasta aidan päälle. Rinteessä julkisivu luetaan "
                 "seinän keskimääräisestä maasta.\n\n"
+                "Ilmakeilauksen seinäluokka (ALS, luokka 13, esim. kaupungin TerraScan-luokittelu): linjat "
+                "seinäpisteistä ylhäältä katsottuna, ilman maanpintaa ja julkisivun tarkistusta. Tarkkuus "
+                "desimetriluokkaa (kantakarttaa vastaan mediaani noin 8 cm): luonnos tai kantakartan tarkistus, "
+                "ei mittaus. Katon rakenteet (IV-konehuoneet) erottaa kentästä korkeus_ala_m (alin seinäpiste "
+                "paikallisesta alimmasta, esim. yli 4 m).\n\n"
                 "Tulokset: Seinälinjat pistepilvestä (taso SEINA = varma, EPAVARMA = lyhyt tai vino, "
                 "PAATELTY = ääriviivan liitos ilman pisteitä; kentät sokkeli_cm = sokkelin ero julkisivuun, "
                 "+ = ulompana, korkeus_ala/yla_m = julkisivun korkeus maasta, kohina_cm, kallistus_cm_m), "
@@ -146,14 +152,15 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
         return QgsGeometry.fromRect(QgsRectangle(x0 - 1, y0 - 1, x1 + 1, y1 + 1))
 
     def _lue(self, polku, alue, koord, context, feedback):
-        """Pistepilvi alueelta: (paikalliset float32-koordinaatit n x 3, siirto (e0, n0, 0) ETRS-GK25:een)."""
+        """Pistepilvi alueelta: (paikalliset float32-koordinaatit n x 3, siirto (e0, n0, 0) ETRS-GK25:een,
+        pisteiden luokat)."""
         feedback.pushInfo(f"Luetaan pistepilvi {os.path.basename(polku)} (pdal:clip)...")
         rajaus = rajaa_pilvi(polku, alue, koord, "seinat_pistepilvi", context, feedback)
         if rajaus is None:
-            return None, None
+            return None, None, None
         luettava, rajattu = rajaus
         try:
-            xyz, origo = ydin.lue_las_paikallinen(luettava)
+            xyz, origo, luokka = ydin.lue_las_paikallinen(luettava, luokat=True)
         except Exception as e:
             raise QgsProcessingException(f"Pistepilveä ei voitu lukea: {e}")
         finally:
@@ -164,7 +171,7 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
                     pass
         origo[0] += koord["siirto_x"]
         feedback.pushInfo(f"Pistepilvestä {len(xyz):,} pistettä.".replace(",", " "))
-        return xyz, origo
+        return xyz, origo, luokka
 
     def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
         # Pitkä ajo: ei App Napia (macOS) eikä nukahtamista, säie täydelle nopeudelle (ydin.valveilla)
@@ -185,7 +192,7 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
             raise QgsProcessingException(f"Pistepilven koordinaatisto EPSG:{koord['epsg']} ei ole QGIS:n tuntema.")
         feedback.pushInfo(f"Pistepilven koordinaatisto: {koord['selitys']}.")
         alue = self._alue(parameters, context, feedback, polku, koord)
-        xyz, origo = self._lue(polku, alue, koord, context, feedback)
+        xyz, origo, luokka = self._lue(polku, alue, koord, context, feedback)
         if xyz is None or feedback.isCanceled():
             return {}
         if len(xyz) < 1000:
@@ -196,6 +203,18 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
             otsikosta = sp.las_profile(polku)
             profiili = otsikosta or sp.guess_profile(xyz)
             feedback.pushInfo(f"Laite: {profiili} ({'LAS-otsikosta' if otsikosta else 'pistetiheydestä'}).")
+        als = profiili == "als"
+        if als:
+            seina = luokka == ALS_SEINALUOKKA
+            if seina.any():
+                xyz = xyz[seina]
+                feedback.pushInfo(f"Ilmakeilaus: seinäluokan {ALS_SEINALUOKKA} pisteet "
+                                  f"({len(xyz):,}).".replace(",", " "))
+            else:
+                feedback.pushWarning(f"Pilvessä ei ole luokan {ALS_SEINALUOKKA} pisteitä: käytetään kaikkia "
+                                     "pisteitä seinäpisteinä (tulos on huono, jos pilvi ei ole valmiiksi "
+                                     "seinäpisteitä).")
+        del luokka
         opt = sp.WallOptions.for_cloud(xyz, profiili,
                                        indoor=self.parameterAsBoolean(parameters, self.SISATILA, context))
         feedback.setProgress(10)
@@ -209,10 +228,19 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
         if not segs:
             feedback.pushWarning("Seiniä ei löytynyt. Onko alueella keilattuja seiniä (vähintään 2 m korkeita)?")
         feedback.setProgress(60)
-        feedback.pushInfo("Tarkistetaan julkisivu linjojen kohdalta 25 cm välein...")
-        alku = time.time()
-        tarkistus = sp.facade_check(xyz, segs, opt)
-        feedback.pushInfo(_yhteenveto(segs, tarkistus) + f" ({time.time() - alku:.0f} s)")
+        if als:
+            # Ilmakeilauksessa ei ole maanpintaa eikä tiheää julkisivua: ei julkisivun tarkistusta. Linjan
+            # korkeus_ala_m / korkeus_yla_m: alin ja ylin seinäpiste paikallisesta alimmasta (kattorakenteilla
+            # alin piste on korkealla, mutta niin on myös ahtaiden sisäpihojen seinillä).
+            import numpy as np
+            tarkistus = [np.zeros((0, 2)) for _ in segs]
+            feedback.pushInfo("Ilmakeilaus: tarkkuus on desimetriluokkaa (luonnos). Katon rakenteet erottaa "
+                              "kentästä korkeus_ala_m (esim. yli 4 m).")
+        else:
+            feedback.pushInfo("Tarkistetaan julkisivu linjojen kohdalta 25 cm välein...")
+            alku = time.time()
+            tarkistus = sp.facade_check(xyz, segs, opt)
+            feedback.pushInfo(_yhteenveto(segs, tarkistus) + f" ({time.time() - alku:.0f} s)")
         if feedback.isCanceled():
             return {}
         feedback.setProgress(80)
