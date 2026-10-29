@@ -13,7 +13,7 @@ from qgis.core import (QgsFeature, QgsFeatureSink, QgsGeometry, QgsPointXY, QgsP
                        QgsProcessingParameterFileDestination, QgsProcessingParameterNumber, QgsProcessingUtils,
                        QgsCoordinateReferenceSystem, QgsRectangle, Qgis)
 
-from . import ydin
+from . import ruututyo, ydin
 from .pilvi_algoritmi import ALS_SEINALUOKKA, PROFIILIT, _dxf_viivat, _m
 from .seinalinja_algoritmi import GK25, LUKU, TEKSTI, _cm, _kentat
 from .tyylit import aseta_tyylit
@@ -89,6 +89,7 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
     RUUTU = "RUUTU"
     KATTOLUOKKA = "KATTOLUOKKA"
     KATTO_ETAISYYS = "KATTO_ETAISYYS"
+    RINNAKKAIN = "RINNAKKAIN"
     DXF = "DXF"
     SEINAT = "SEINAT"
     POISTETUT = "POISTETUT"
@@ -116,8 +117,11 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
                 "poistamat'. Luokka -1 = ei suodatinta.\n\n"
                 "Laite 'Ilmakeilauksen seinäluokka': ruuduista luetaan vain luokan 13 seinäpisteet (nopea, "
                 "tarkkuus desimetriluokkaa).\n\n"
-                "Muisti: yksi ruutu kerrallaan (tiheä katu 150 m ruudussa noin 2–3 Gt). Isompi ruutu on nopeampi "
-                "mutta vie enemmän muistia ja tilapäistä levytilaa.")
+                "Muisti: tiheä katu 150 m ruudussa vie noin 2–4 Gt. Ruutuja lasketaan rinnakkain erillisissä "
+                "prosesseissa: 0 = koneen mukaan (ytimiä yksi vähemmän, ruutu 4 Gt muistia 6 Gt:n varan "
+                "jälkeen, enintään 4; 16 Gt:n koneessa 2), 1 = yksi kerrallaan. Jos muisti loppuu, pienennä "
+                "rinnakkaisuutta tai ruudun kokoa. Isompi ruutu on nopeampi mutta vie enemmän muistia ja "
+                "tilapäistä levytilaa.")
 
     def initAlgorithm(self, config=None):  # noqa: N802
         self.addParameter(QgsProcessingParameterFile(
@@ -136,6 +140,9 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterNumber(
             self.KATTO_ETAISYYS, "Seinä enintään näin kaukana katosta (m)",
             type=QgsProcessingParameterNumber.Type.Double, defaultValue=1.5, minValue=0.5, maxValue=5.0))
+        self.addParameter(QgsProcessingParameterNumber(
+            self.RINNAKKAIN, "Ruutuja rinnakkain (0 = koneen mukaan, 1 = yksi kerrallaan)",
+            type=QgsProcessingParameterNumber.Type.Integer, defaultValue=0, minValue=0, maxValue=16))
         self.addParameter(QgsProcessingParameterFileDestination(
             self.DXF, "Tallenna seinälinjat DXF:ksi (valinnainen)", fileFilter="DXF (*.dxf)", optional=True,
             createByDefault=False))
@@ -150,50 +157,43 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
         with ydin.valveilla():
             return self._aja(parameters, context, feedback)
 
-    def _aja(self, parameters, context, feedback):
+    def _ruututyot(self, parameters, context, feedback):
+        """Rinnakkaiset ruudut (ruututyo.Ruututyot) tai None = yksi kerrallaan tässä prosessissa."""
+        n = self.parameterAsInt(parameters, self.RINNAKKAIN, context) or ruututyo.oletus_rinnakkain()
+        if n <= 1:
+            feedback.pushInfo("Ruudut lasketaan yksi kerrallaan.")
+            return None
+        python, lib = ruututyo.qgis_python(), os.path.dirname(os.path.abspath(sp.__file__))
+        if python is None or not ruututyo.toimiiko(python, lib):
+            feedback.pushWarning("Rinnakkaisajo ei onnistu (QGIS:n Python-tulkki ei käynnisty erillisenä "
+                                 f"prosessina: {python or 'ei löytynyt'}): ruudut lasketaan yksi kerrallaan.")
+            return None
+        feedback.pushInfo(f"Ruutuja lasketaan {n} kerrallaan erillisissä prosesseissa.")
+        return ruututyo.Ruututyot(python, lib, n, QgsProcessingUtils.tempFolder())
+
+    def _ruudut(self, ruudut, koko, e0, n0, lahde, polku, koord, profiili, katto, kattoluokka, tyot, loydetyt,
+                maa, context, feedback):
+        """Ruutujen linjat loydetyt-sanakirjaan ja maanpinnat maa-olioon. Ruudut luetaan tässä järjestyksessä;
+        rinnakkain laskettaessa seuraava luetaan, kun edelliset vielä laskevat. False, jos peruttiin."""
         import numpy as np
 
-        polku = self.parameterAsFile(parameters, self.PILVI, context)
-        try:
-            koord = ydin.las_koordinaatisto(polku)
-        except (OSError, ValueError) as e:
-            raise QgsProcessingException(str(e))
-        feedback.pushInfo(f"Pistepilven koordinaatisto: {koord['selitys']}.")
-        koko = self.parameterAsDouble(parameters, self.RUUTU, context)
-        kattoluokka = self.parameterAsInt(parameters, self.KATTOLUOKKA, context)
-        katto_etaisyys = self.parameterAsDouble(parameters, self.KATTO_ETAISYYS, context)
-        profiili = PROFIILIT[self.parameterAsEnum(parameters, self.PROFIILI, context)][1]
+        def valmis(avain, tulos):
+            i, j, k = avain
+            loydetyt[(i, j)] = tulos["linjat"]
+            maa.lisaa(i, j, tulos["maa"])
+            feedback.pushInfo(f"Ruutu {k + 1}/{len(ruudut)}: {tulos['pisteita'] / 1e6:.1f} milj. pistettä, "
+                              f"{sum(d >= 0 for _, d in tulos['linjat'])} linjaa ({tulos['aika']:.0f} s).")
 
-        alue = _gk25_alue(ydin.las_alue(polku), koord, context)
-        if parameters.get(self.LAAJUUS) not in (None, ""):
-            r = self.parameterAsExtent(parameters, self.LAAJUUS, context, QgsCoordinateReferenceSystem(GK25))
-            if not r.isNull() and r.width() > 0 and r.height() > 0:
-                alue = (r.xMinimum(), r.yMinimum(), r.xMaximum(), r.yMaximum())
-        if alue is None:
-            raise QgsProcessingException("Pistepilven aluetta ei saatu otsikosta.")
-        ruudut = ydin.ruudut(*alue, koko)
-        feedback.pushInfo(f"Alue {alue[2] - alue[0]:.0f} x {alue[3] - alue[1]:.0f} m: {len(ruudut)} ruutua "
-                          f"({koko:.0f} m).")
-        lahde = _copc(polku, context, feedback)
-        if feedback.isCanceled():
-            return {}
-
-        e0, n0 = ruudut[0][2], ruudut[0][3]               # paikallisten koordinaattien origo
-        katto = None
-        if kattoluokka >= 0:
-            katto = ydin.Kattorasteri((alue[0] - LIMITYS_M, alue[1] - LIMITYS_M, alue[2] + LIMITYS_M,
-                                       alue[3] + LIMITYS_M), KATTOSOLU_M)
-        maa = _RuutujenMaa(koko, e0, n0)
-        loydetyt, opt, alku = {}, None, time.time()
+        opt = None
         for k, (i, j, re, rn) in enumerate(ruudut):
             if feedback.isCanceled():
-                return {}
+                return False
             feedback.setProgress(5 + 85 * k / len(ruudut))
             rajaus = QgsGeometry.fromRect(QgsRectangle(re - LIMITYS_M, rn - LIMITYS_M, re + koko + LIMITYS_M,
                                                        rn + koko + LIMITYS_M))
             tulos = rajaa_pilvi(lahde, rajaus, koord, f"ruutu_{i}_{j}", context, feedback)
             if tulos is None:
-                return {}
+                return False
             luettava, rajattu = tulos
             try:
                 xyz, origo, luokka = ydin.lue_las_paikallinen(luettava, luokat=True)
@@ -226,13 +226,69 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
             if len(xyz) < MIN_PISTEITA:
                 continue
             xyz[:, :2] += (origo[:2] - (re, rn)).astype(np.float32)          # ruudun omiin koordinaatteihin
-            t0 = time.time()
-            segs = sp.extract_walls(xyz, opt)
-            loydetyt[(i, j)] = sp.tile_core(segs, (re - e0, rn - n0), koko)
-            maa.lisaa(i, j, sp.Ground(sp.ground_sample(xyz), opt.ground_cell))
-            feedback.pushInfo(f"Ruutu {k + 1}/{len(ruudut)}: {len(xyz) / 1e6:.1f} milj. pistettä, "
-                              f"{sum(d >= 0 for _, d in loydetyt[(i, j)])} linjaa ({time.time() - t0:.0f} s).")
+            base = (re - e0, rn - n0)
+            if tyot is None:
+                valmis((i, j, k), ruututyo.aja(xyz, opt, base, koko))
+            else:
+                while not tyot.vapaa():
+                    valmiit = tyot.odota(feedback.isCanceled)
+                    if valmiit is None:
+                        return False
+                    for v in valmiit:
+                        valmis(*v)
+                tyot.aloita((i, j, k), xyz, opt, base, koko)
             del xyz
+        while tyot is not None and tyot.kaynnissa:
+            valmiit = tyot.odota(feedback.isCanceled)
+            if valmiit is None:
+                return False
+            for v in valmiit:
+                valmis(*v)
+        return True
+
+    def _aja(self, parameters, context, feedback):
+        polku = self.parameterAsFile(parameters, self.PILVI, context)
+        try:
+            koord = ydin.las_koordinaatisto(polku)
+        except (OSError, ValueError) as e:
+            raise QgsProcessingException(str(e))
+        feedback.pushInfo(f"Pistepilven koordinaatisto: {koord['selitys']}.")
+        koko = self.parameterAsDouble(parameters, self.RUUTU, context)
+        kattoluokka = self.parameterAsInt(parameters, self.KATTOLUOKKA, context)
+        katto_etaisyys = self.parameterAsDouble(parameters, self.KATTO_ETAISYYS, context)
+        profiili = PROFIILIT[self.parameterAsEnum(parameters, self.PROFIILI, context)][1]
+
+        alue = _gk25_alue(ydin.las_alue(polku), koord, context)
+        if parameters.get(self.LAAJUUS) not in (None, ""):
+            r = self.parameterAsExtent(parameters, self.LAAJUUS, context, QgsCoordinateReferenceSystem(GK25))
+            if not r.isNull() and r.width() > 0 and r.height() > 0:
+                alue = (r.xMinimum(), r.yMinimum(), r.xMaximum(), r.yMaximum())
+        if alue is None:
+            raise QgsProcessingException("Pistepilven aluetta ei saatu otsikosta.")
+        ruudut = ydin.ruudut(*alue, koko)
+        feedback.pushInfo(f"Alue {alue[2] - alue[0]:.0f} x {alue[3] - alue[1]:.0f} m: {len(ruudut)} ruutua "
+                          f"({koko:.0f} m).")
+        lahde = _copc(polku, context, feedback)
+        if feedback.isCanceled():
+            return {}
+
+        e0, n0 = ruudut[0][2], ruudut[0][3]               # paikallisten koordinaattien origo
+        katto = None
+        if kattoluokka >= 0:
+            katto = ydin.Kattorasteri((alue[0] - LIMITYS_M, alue[1] - LIMITYS_M, alue[2] + LIMITYS_M,
+                                       alue[3] + LIMITYS_M), KATTOSOLU_M)
+        maa = _RuutujenMaa(koko, e0, n0)
+        loydetyt, alku = {}, time.time()
+        tyot = self._ruututyot(parameters, context, feedback)
+        try:
+            if not self._ruudut(ruudut, koko, e0, n0, lahde, polku, koord, profiili, katto, kattoluokka, tyot,
+                                loydetyt, maa, context, feedback):
+                return {}
+        except RuntimeError as e:
+            raise QgsProcessingException(f"Seinälinjoja ei saatu: {e}")
+        finally:
+            if tyot is not None:
+                tyot.lopeta()
 
         segs = sp.drop_seam_duplicates(loydetyt)
         osuus = None

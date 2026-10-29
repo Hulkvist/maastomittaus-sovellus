@@ -92,6 +92,7 @@ class WallOptions:
     # ikkunanauhan alla (0,4–1,1 m) säilyy.
     bush_span: float = 0.5       # julkisivun korkeusväli alle [m] ...
     bush_noise: float = 0.015    # ... ja kohina yli [m] -> linja pois (0 = ei suodatinta)
+    bush_max_len: float = np.inf  # vain tätä lyhyemmät linjat [m] (Stonex: pitkät matalat seinät säilyvät)
     # Aita seinälinjan jatkeena (_trim_fences): linjan päästä pois vähintään fence_min matala osuus, jonka ylin
     # piste on alle fence_top ja vähintään fence_drop linjan tyypillistä matalampi (0 = ei lyhennystä)
     fence_top: float = 2.2
@@ -125,7 +126,11 @@ PROFILES = {
     # Pensassuodatin pois: oikeissa Stonex-pilvissä pitkienkin seinien julkisivu oli ohut ja kohiseva (Kruna2
     # 30 m, Katajaharju 17 m); viidessä kohteessa suodatin pudotti seiniä yhtä paljon kuin roskaa.
     "stonex": dict(voxel=0.03, wall_cell=0.03, cover_top=2.0, cover_near=False, facade_max=3.5, inlier_tol=0.03,
-                   wall_offset=0.04, outline_offset=0.06, facade_tol=0.01, bush_noise=0.0),
+                   wall_offset=0.04, outline_offset=0.06, facade_tol=0.01,
+                   # Pensassuodatin vain lyhyille ja hyvin ohuille: väljemmin (0,5 m, 15 mm, kaikki pituudet) se
+                   # pudotti Kruna2:sta ja Katajaharjusta pitkiä oikeita seiniä (5 kohdetta: 141 m seinää). Näin
+                   # pois 44 m linjoja rakennusten ulkopuolelta ja 8 m seinien vierestä, kattavuus ennallaan.
+                   bush_span=0.3, bush_noise=0.018, bush_max_len=3.0),
     # Ilmakeilauksen seinäluokka (esim. TerraScanin luokka 13): ylhäältä harva (noin 40 pistettä seinämetrillä),
     # seinä 2D:ssä noin 10 cm paksu viiva. Ei maanpintaa eikä julkisivun tarkennusta.
     "als": dict(wall_cell=0.10, inlier_tol=0.10, min_density=4.0, min_length=1.0, max_gap=1.0,
@@ -143,6 +148,8 @@ def guess_profile(xyz: np.ndarray, sample: int = 2_000_000) -> str:
     p = xyz if len(xyz) <= sample else xyz[np.random.default_rng(0).choice(len(xyz), sample, replace=False)]
     q = np.floor(p[:, :2] / 0.5).astype(np.int64)
     cells = len(np.unique(q[:, 0] * 10**9 + q[:, 1]))
+    # Pinta-ala otoksesta (osuu samoihin ruutuihin kuin koko pilvi), pistemäärä koko pilvestä: tiheys on koko
+    # pilven. len(p) antaisi otoksen tiheyden, isossa pilvessä kymmeniä kertoja liian pienen.
     density = len(xyz) / (cells * 0.25)
     return "iphone" if density > 20_000 else "stonex" if density > 500 else "als"
 
@@ -1545,7 +1552,8 @@ def _trim_fences(segs: list[Segment], xyz: np.ndarray, rel: np.ndarray, index: _
 def _bush(seg: Segment, opt: WallOptions) -> bool:
     """Pensaan reuna (ks. WallOptions.bush_span): ohut ja kohiseva julkisivu."""
     h, noise = seg.info.get("korkeus"), seg.info.get("kohina")
-    return h is not None and noise is not None and h[1] - h[0] < opt.bush_span and noise > opt.bush_noise
+    return (h is not None and noise is not None and h[1] - h[0] < opt.bush_span and noise > opt.bush_noise
+            and seg.length < opt.bush_max_len)
 
 
 def _outside(seg: Segment, gxy: np.ndarray, index: _GridIndex, near: float = 0.4, far: float = 3.0) -> int:

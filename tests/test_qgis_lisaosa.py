@@ -550,3 +550,77 @@ def test_taysi_vauhti_ja_valveilla_eivat_kaada():
     with pytest.raises(ValueError):          # poikkeus kulkee läpi, ja aktiviteetti päättyy
         with ydin.valveilla():
             raise ValueError("x")
+
+
+def _ruututyo():
+    spec = importlib.util.spec_from_file_location(
+        "maastomittaus_ruututyo", os.path.join(HAKEMISTO, "qgis_plugin", "maastomittaus", "ruututyo.py"))
+    moduuli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(moduuli)
+    return moduuli
+
+
+def test_rinnakkaisten_ruutujen_maara():
+    rt = _ruututyo()
+    assert rt.oletus_rinnakkain(ytimet=8, muisti_gt=16) == 2       # työkone
+    assert rt.oletus_rinnakkain(ytimet=4, muisti_gt=8) == 1
+    assert rt.oletus_rinnakkain(ytimet=16, muisti_gt=64) == 4
+    assert rt.oletus_rinnakkain(ytimet=2, muisti_gt=64) == 1
+    assert rt.oletus_rinnakkain() >= 1
+
+
+def test_ruudut_aliprosesseissa_sama_tulos(tmp_path):
+    """Aliprosessissa laskettu ruutu antaa saman tuloksen kuin sama laskenta QGIS:n omassa prosessissa."""
+    import numpy as np
+    import seinat_pilvesta as sp
+
+    rt = _ruututyo()
+    rng = np.random.default_rng(4)
+    nurkat = np.array([(20, 20), (60, 20), (60, 45), (20, 45), (20, 20)], float)
+    osat = []
+    for a, b in zip(nurkat[:-1], nurkat[1:]):
+        n = int(np.linalg.norm(b - a) * 40)
+        xy = a + np.outer(rng.uniform(0, 1, n), b - a) + rng.normal(0, 0.05, (n, 2))
+        osat.append(np.column_stack([xy, rng.uniform(0.5, 9, n)]))
+    xyz = np.vstack(osat).astype(np.float32)
+    opt = sp.WallOptions.for_cloud(None, "als")
+    tyot = rt.Ruututyot(sys.executable, HAKEMISTO, 2, str(tmp_path))
+    try:
+        tyot.aloita(("a",), xyz, opt, (100.0, 0.0), 80.0)
+        tyot.aloita(("b",), xyz, opt, (0.0, 100.0), 80.0)
+        assert not tyot.vapaa()
+        tulokset = {}
+        while tyot.kaynnissa:
+            for avain, tulos in tyot.odota(lambda: False):
+                tulokset[avain] = tulos
+    finally:
+        tyot.lopeta()
+    assert not os.path.exists(tyot.kansio)
+    for avain, base in ((("a",), (100.0, 0.0)), (("b",), (0.0, 100.0))):
+        oma = rt.aja(xyz.copy(), opt, base, 80.0)
+        muu = tulokset[avain]
+        assert len(muu["linjat"]) == len(oma["linjat"]) == 4
+        for (s, d), (t, e) in zip(muu["linjat"], oma["linjat"]):
+            assert np.array_equal(s.p0, t.p0) and np.array_equal(s.p1, t.p1) and d == e
+        assert np.array_equal(muu["maa"].at(np.array([[30.0, 30.0]])), oma["maa"].at(np.array([[30.0, 30.0]])))
+
+
+def test_ruudun_virhe_ja_peruutus(tmp_path):
+    import numpy as np
+
+    rt = _ruututyo()
+    assert rt.toimiiko(sys.executable, HAKEMISTO)
+    assert not rt.toimiiko(str(tmp_path / "python"), HAKEMISTO)     # tulkkia ei ole
+    tyot = rt.Ruututyot(sys.executable, HAKEMISTO, 1, str(tmp_path))
+    try:
+        tyot.aloita(("x",), np.zeros((10, 3), np.float32), None, (0, 0), 1.0)     # asetukset puuttuvat
+        with pytest.raises(RuntimeError, match="koodi 1.*Error"):
+            while tyot.kaynnissa:
+                tyot.odota(lambda: False)
+    finally:
+        tyot.lopeta()
+    tyot = rt.Ruututyot(sys.executable, HAKEMISTO, 1, str(tmp_path))
+    tyot.aloita(("y",), np.zeros((10, 3), np.float32), None, (0, 0), 1.0)
+    assert tyot.odota(lambda: True) is None                         # peruttu: ei odoteta
+    tyot.lopeta()
+    assert not tyot.kaynnissa and not os.path.exists(tyot.kansio)
