@@ -143,6 +143,8 @@ def guess_profile(xyz: np.ndarray, sample: int = 2_000_000) -> str:
     p = xyz if len(xyz) <= sample else xyz[np.random.default_rng(0).choice(len(xyz), sample, replace=False)]
     q = np.floor(p[:, :2] / 0.5).astype(np.int64)
     cells = len(np.unique(q[:, 0] * 10**9 + q[:, 1]))
+    # Pinta-ala otoksesta (osuu samoihin ruutuihin kuin koko pilvi), pistemäärä koko pilvestä: tiheys on koko
+    # pilven. len(p) antaisi otoksen tiheyden, isossa pilvessä kymmeniä kertoja liian pienen.
     density = len(xyz) / (cells * 0.25)
     return "iphone" if density > 20_000 else "stonex" if density > 500 else "als"
 
