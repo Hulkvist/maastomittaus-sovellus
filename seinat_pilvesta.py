@@ -98,6 +98,18 @@ class WallOptions:
     fence_top: float = 2.2
     fence_drop: float = 0.5
     fence_min: float = 0.75
+    # Siltaus (_bridge_upper): seinälinjojen päät yhdistetään aukon (näyteikkuna, lasiovi, sisäänvedetty
+    # sisäänkäynti tai pohjakerros) yli, kun yläjulkisivu (bridge_lo–bridge_hi maasta) jatkuu välin kohdalla.
+    # Väli pää- tai kohtisuoraan linjoihin nähden; samansuuntaisten päät enintään bridge_side sivuttain.
+    # Silta on ilman pisteitä, joten DXF:ssä se on PAATELTY. 0 = ei siltausta.
+    bridge_max: float = 0.0      # pisin silta [m]
+    bridge_side: float = 0.3
+    bridge_tol: float = 0.3      # yläjulkisivun pisteet enintään näin kaukana sillasta [m]
+    bridge_lo: float = 2.0
+    bridge_hi: float = 6.0
+    bridge_cover: float = 0.8    # vähimmäisosuus 0,5 m paloista, joissa yläjulkisivu ...
+    bridge_pts: int = 40         # ... vähintään näin monta 5 cm vokselia ...
+    bridge_span: float = 1.0     # ... vähintään näin korkealla välillä [m]
     # Ilmakeilauksen seinäpisteet (profiili als, extract_walls_als): als_cell-ruudussa on oltava pisteitä
     # vähintään als_span korkeusväliltä (kattoreunan ja räystään yksittäiset pisteet pois), ja linjat
     # yhdistetään rakennuksittain (als_group lähempänä toisiaan olevat linjat samaan ryhmään)
@@ -130,7 +142,11 @@ PROFILES = {
                    # Pensassuodatin vain lyhyille ja hyvin ohuille: väljemmin (0,5 m, 15 mm, kaikki pituudet) se
                    # pudotti Kruna2:sta ja Katajaharjusta pitkiä oikeita seiniä (5 kohdetta: 141 m seinää). Näin
                    # pois 44 m linjoja rakennusten ulkopuolelta ja 8 m seinien vierestä, kattavuus ennallaan.
-                   bush_span=0.3, bush_noise=0.018, bush_max_len=3.0),
+                   bush_span=0.3, bush_noise=0.018, bush_max_len=3.0,
+                   # Siltaus: käyttäjän piirtämistä puuttuvista seinistä (4 kohdetta, 233 m) 146 m jäi tunnistamatta
+                   # (lasi, sisäänvedot), ja 136 m:llä yläjulkisivu jatkui. Siltaus: linjojen kattamana 33 -> 171 m;
+                   # siltoja 5 kohteessa 756 m, niistä kantakartan ulkopuolella 58 m (osin kartalta puuttuvia taloja).
+                   bridge_max=40.0),
     # Ilmakeilauksen seinäluokka (esim. TerraScanin luokka 13): ylhäältä harva (noin 40 pistettä seinämetrillä),
     # seinä 2D:ssä noin 10 cm paksu viiva. Ei maanpintaa eikä julkisivun tarkennusta.
     "als": dict(wall_cell=0.10, inlier_tol=0.10, min_density=4.0, min_length=1.0, max_gap=1.0,
@@ -1441,6 +1457,8 @@ def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segme
             segs = [s for s in segs if not _bush(s, opt)]
         if opt.fence_top > 0:
             segs = close_corners(_trim_fences(segs, pts, rel, index, opt), opt)
+    if opt.bridge_max > 0 and not opt.indoor and segs:
+        segs = segs + _bridge_upper(segs, xyz, height, opt)
         # Pitkä seinä, jolta julkisivu löytyi, on varma suunnasta riippumatta (vinot korttelit)
         for s in segs:
             if s.length >= opt.sure_length and s.info.get("kohina") is not None:
@@ -1576,6 +1594,125 @@ def _comparable(a: Segment, b: Segment) -> bool:
     short, long_ = (a, b) if a.length <= b.length else (b, a)
     ns, nl = short.info.get("kohina"), long_.info.get("kohina")
     return short.length >= 0.5 * long_.length and (ns is None or nl is None or ns <= nl + 0.005)
+
+
+def _bridge_candidates(segs: list[Segment], opt: WallOptions) -> list[tuple[float, int, int]]:
+    """Siltaehdokkaat (pituus, pää a, pää b) lyhimmästä alkaen; päät 2k (p0) ja 2k + 1 (p1) linjasta k.
+    Väli on linjan suuntainen (pää osoittaa väliin ja toinen pää on linjan jatkeella) tai kohtisuora."""
+    cos_lim, sin_lim = np.cos(np.radians(3.0)), np.sin(np.radians(3.0))
+    E = np.array([p for s in segs for p in (s.p0[:2], s.p1[:2])])
+    out = []
+    for a in range(len(E)):
+        d = np.linalg.norm(E - E[a], axis=1)
+        for b in np.flatnonzero((d > 0.3) & (d <= opt.bridge_max)):
+            if b <= a or a // 2 == b // 2:
+                continue
+            v = (E[b] - E[a]) / d[b]
+            ok = True
+            for k, w in ((a, v), (b, -v)):
+                s = segs[k // 2]
+                c = abs(w @ s.direction)
+                if c >= cos_lim:
+                    out_dir = s.direction if k % 2 else -s.direction
+                    ok = out_dir @ w > 0.5 and abs((E[b] - E[a]) @ s.normal) <= opt.bridge_side
+                else:
+                    ok = c <= sin_lim
+                if not ok:
+                    break
+            if ok:
+                out.append((float(d[b]), a, b))
+    return sorted(out)
+
+
+def _bridge_upper(segs: list[Segment], xyz: np.ndarray, height, opt: WallOptions,
+                  chunk: int = 5_000_000) -> list[Segment]:
+    """Sillat aukkojen yli (ks. WallOptions.bridge_max): ehdokkaat lyhimmästä alkaen, kumpikin pää enintään
+    kerran samaan suuntaan, ei olemassa olevan rinnakkaisen linjan kohdalle (0,5 m) eikä toisen seinän läpi.
+    Yläjulkisivu luetaan vain ehdokkaiden kohdalta (1 m ruudut), joten muistia ei kulu."""
+    cands = _bridge_candidates(segs, opt)
+    if not cands:
+        return []
+    E = np.array([p for s in segs for p in (s.p0[:2], s.p1[:2])])
+    cells = set()
+    for _, a, b in cands:
+        n = max(2, int(np.linalg.norm(E[b] - E[a]) / 0.5) + 2)
+        for p in E[a] + np.linspace(0, 1, n)[:, None] * (E[b] - E[a]):
+            i, j = np.floor(p).astype(np.int64)
+            cells.update((i + di, j + dj) for di in (-1, 0, 1) for dj in (-1, 0, 1))
+    ck = np.array([i * 10**7 + j for i, j in cells], np.int64)
+    parts = []
+    for start in range(0, len(xyz), chunk):
+        p = xyz[start:start + chunk]
+        ij = np.floor(p[:, :2]).astype(np.int64)
+        p = p[np.isin(ij[:, 0] * 10**7 + ij[:, 1], ck)]
+        h = height(p)
+        keep = (h >= opt.bridge_lo) & (h < opt.bridge_hi)
+        parts.append(np.c_[p[keep, :2], h[keep]])
+    up = voxel_thin(np.concatenate(parts), 0.05) if parts and sum(map(len, parts)) else np.zeros((0, 3))
+    index = _GridIndex(up[:, :2], 1.0) if len(up) else None
+    cos_lim = np.cos(np.radians(3.0))
+    used, out = set(), []
+    for L, a, b in cands:
+        p, q = E[a], E[b]
+        v = (q - p) / L
+        n = np.array([-v[1], v[0]])
+        key = tuple(np.round(v, 1))
+        if (a, key) in used or (b, tuple(-np.array(key))) in used:
+            continue
+        if _bridge_blocked(p, q, v, segs + out, cos_lim):
+            continue
+        if index is None:
+            continue
+        r = up[index.box(np.minimum(p, q) - 0.5, np.maximum(p, q) + 0.5)]
+        t, s = (r[:, :2] - p) @ v, (r[:, :2] - p) @ n
+        # Yläjulkisivu voi olla hieman sivussa alaosan linjasta (Katajaharju: 15 cm, Kruna2: listat ja
+        # ulokkeet eri tasoissa), joten mukaan kaikki enintään bridge_tol sivussa
+        m = (np.abs(s) < opt.bridge_tol) & (t > 0) & (t < L)
+        nb = max(1, int(round(L / 0.5)))      # ei vajaata viimeistä palaa
+        k = np.minimum((t[m] / (L / nb)).astype(int), nb - 1)
+        cnt = np.bincount(k, minlength=nb)
+        lo, hi = np.full(nb, np.inf), np.full(nb, -np.inf)
+        np.minimum.at(lo, k, r[m, 2])
+        np.maximum.at(hi, k, r[m, 2])
+        if np.mean((cnt >= opt.bridge_pts) & (hi - lo >= opt.bridge_span)) < opt.bridge_cover:
+            continue
+        out.append(Segment(p.copy(), q.copy(), v, float(n @ p), np.zeros((0, 2)), snapped=True,
+                           info={"silta": True}))
+        used.update({(a, key), (b, tuple(-np.array(key)))})
+    return out
+
+
+def _bridge_blocked(p: np.ndarray, q: np.ndarray, v: np.ndarray, segs: list[Segment], cos_lim: float,
+                    same: float = 0.15, dup: float = 0.5) -> bool:
+    """Onko välin p–q kohdalla jo seinä: samassa tasossa (enintään same sivussa) rinnakkainen linja yli 0,5 m
+    (tai 30 % välistä), rinnakkaiset linjat enintään dup sivussa yhteensä yli puolet välistä (silta olisi
+    kaksoislinja; syvennysten palat välissä eivät estä) tai toinen seinä poikki (väli ilman päitä leikkaa)."""
+    L = float(np.linalg.norm(q - p))
+    n = np.array([-v[1], v[0]])
+    a, b = p + 0.1 * v, q - 0.1 * v
+    near = 0.0
+    for s in segs:
+        s0, s1 = s.p0[:2], s.p1[:2]
+        if min(_point_segment(x, s) for x in (p, q, (p + q) / 2)) > max(dup, L):
+            continue
+        if abs(s.direction @ v) >= cos_lim:
+            ts = np.array([(s0 - p) @ v, (s1 - p) @ v])
+            t0, t1 = max(ts.min(), 0.0), min(ts.max(), L)
+            if t1 - t0 <= 0:
+                continue
+            # sivuetäisyys välin kohdalla (pitkä linja voi kääntyä poispäin kauempana)
+            ss = [(s0 + (s1 - s0) * (t - ts[0]) / (ts[1] - ts[0]) - p) @ n for t in (t0, t1)]
+            side = max(abs(x) for x in ss)
+            if side <= same and t1 - t0 > min(0.5, 0.3 * L):
+                return True
+            if side <= dup:
+                near += t1 - t0
+            continue
+        d1, d2 = (a - s0) @ s.normal, (b - s0) @ s.normal
+        e1, e2 = (s0 - a) @ n, (s1 - a) @ n
+        if d1 * d2 < 0 and e1 * e2 < 0:
+            return True
+    return near > 0.5 * L
 
 
 def _drop_upper_duplicates(segs: list[Segment], side: float = 0.35, angle_deg: float = 10.0,
