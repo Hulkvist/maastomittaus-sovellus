@@ -9,7 +9,7 @@ import os
 import time
 
 from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsFeatureSink,
-                       QgsGeometry, QgsPointXY, QgsProcessing, QgsProcessingAlgorithm, QgsProcessingException,
+                       QgsCircularString, QgsGeometry, QgsPoint, QgsPointXY, QgsProcessing, QgsProcessingAlgorithm, QgsProcessingException,
                        QgsProcessingParameterBoolean, QgsProcessingParameterEnum, QgsProcessingParameterExtent,
                        QgsProcessingParameterFeatureSink,
                        QgsProcessingParameterFeatureSource, QgsProcessingParameterFile,
@@ -251,10 +251,15 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
         e0, n0 = float(origo[0]), float(origo[1])
         tulokset_id = {}
         seinat, tulokset_id[self.SEINAT] = self.parameterAsSink(parameters, self.SEINAT, context, SEINAKENTAT,
-                                                                Qgis.WkbType.LineString, crs)
+                                                                Qgis.WkbType.CompoundCurve, crs)
         for k, s in enumerate(segs, start=1):
             info = s.info or {}
             korkeus = info.get("korkeus") or (None, None)
+            if "kaari" in info:
+                f = QgsFeature(SEINAKENTAT)
+                f.setGeometry(kaari_geometria(s, e0, n0))
+                f.setAttributes(["SEINA", round(s.length, 3), f"Seinä {k}"] + [None] * 7)
+                seinat.addFeature(f, QgsFeatureSink.Flag.FastInsert)
             for a, b, mitattu, varma in sp.measured_pieces([s]):
                 taso = "PAATELTY" if not mitattu else "SEINA" if varma else "EPAVARMA"
                 f = QgsFeature(SEINAKENTAT)
@@ -276,7 +281,7 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
 
         dxf_polku = self.parameterAsFileOutput(parameters, self.DXF, context)
         if dxf_polku and segs:
-            sp.write_dxf_r12(dxf_polku, _dxf_viivat(segs, maa, e0, n0))
+            sp.write_dxf_r12(dxf_polku, _dxf_viivat(segs, maa, e0, n0), _dxf_kaaret(segs, maa, e0, n0))
             feedback.pushInfo(f"DXF: {dxf_polku}")
             tulokset_id[self.DXF] = dxf_polku
 
@@ -291,6 +296,28 @@ class SeinatPilvestaAlgoritmi(QgsProcessingAlgorithm):
         aseta_tyylit(context, [(tulokset_id.get(self.SEINAT), "pilven_seinat"),
                                (tulokset_id.get(self.SEINAT_3D), "seinat_3d")], pistepilvi, luokat)
         return tulokset_id
+
+
+def kaari_geometria(s, e0, n0):
+    """Kaari (Segment.info["kaari"]) QGIS:n kaarigeometriaksi alku-, keski- ja loppupisteestä."""
+    cx, cy, r, a0, a1 = s.info["kaari"]
+    am = (a0 + a1) / 2
+    import math
+    return QgsGeometry(QgsCircularString(QgsPoint(cx + r * math.cos(a0) + e0, cy + r * math.sin(a0) + n0),
+                                         QgsPoint(cx + r * math.cos(am) + e0, cy + r * math.sin(am) + n0),
+                                         QgsPoint(cx + r * math.cos(a1) + e0, cy + r * math.sin(a1) + n0)))
+
+
+def _dxf_kaaret(segs, maa, e0, n0):
+    """DXF:n kaaret [(layer, (x, y, z), säde, alku°, loppu°)]; z = maanpinta keskipisteessä + 1 m."""
+    import math
+    out = []
+    for s in segs:
+        if "kaari" in s.info:
+            cx, cy, r, a0, a1 = s.info["kaari"]
+            out.append(("SEINA", (cx + e0, cy + n0, _maanpinta(maa, (cx, cy)) + 1.0), r, math.degrees(a0),
+                        math.degrees(a1)))
+    return out
 
 
 def _m(arvo):
@@ -311,8 +338,8 @@ def _seinat_3d(segs, tarkistus, maa, e0, n0):
     tulos = []
     for k, (s, rivit) in enumerate(zip(segs, tarkistus), start=1):
         z = _maanpinta(maa, (s.p0 + s.p1) / 2) + SEINAN_KORKEUS_M / 2
-        viiva = ydin.viivat_pisteista([(f"Seinä {k}", [(s.p0[0] + e0, s.p0[1] + n0, z),
-                                                       (s.p1[0] + e0, s.p1[1] + n0, z)])])["viivat"][0]
+        viiva = ydin.viivat_pisteista([(f"Seinä {k}", [(float(x) + e0, float(y) + n0, z)
+                                                       for x, y in sp.arc_points(s)])])["viivat"][0]
         naytteet = [(float(s.p0[0] + s.direction[0] * t + e0), float(s.p0[1] + s.direction[1] * t + n0),
                      None if np.isnan(o) else float(o)) for t, o in rivit]
         tulos.append((viiva, naytteet or None))

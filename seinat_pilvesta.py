@@ -115,6 +115,18 @@ class WallOptions:
     # kumpikin pää on kohtisuoran linjan pää eikä kummassakaan jatku samansuuntainen linja, kohtisuorien
     # on oltava vähintään näin pitkiä [m].
     bridge_perp_min: float = 2.5
+    # Kaaret (fit_arcs): pyöreä torni, erkkeri tai kaareva julkisivu yhdeksi kaareksi (Segment.info["kaari"]).
+    # Ympyrä sovitetaan seinäsoluihin, joita pitkät suorat eivät selitä. Kaari hyväksytään, kun kaksi suoraa
+    # sopii vähintään arc_corner kertaa huonommin (nurkat ja porrastukset 2,5–3,4, oikeat kaaret 4,4–11; Kruna1–2,
+    # virtuaalitorni), kaaren kohdan renkaassa (r ± 0,3 m) vähintään arc_share soluista on kaarella (puut ja
+    # pensaat ovat hajallaan) ja soluja on arc_cover osuudella kaarta. 0 = ei kaaria.
+    arc_max_r: float = 0.0       # suurin säde [m]
+    arc_min_r: float = 1.0
+    arc_min_len: float = 1.5     # lyhin kaari [m] ...
+    arc_min_deg: float = 30.0    # ... ja kulma
+    arc_corner: float = 4.0
+    arc_share: float = 0.4
+    arc_cover: float = 0.6       # vähimmäisosuus kaaresta, jolla on soluja (0,25 m paloina)
     # Ilmakeilauksen seinäpisteet (profiili als, extract_walls_als): als_cell-ruudussa on oltava pisteitä
     # vähintään als_span korkeusväliltä (kattoreunan ja räystään yksittäiset pisteet pois), ja linjat
     # yhdistetään rakennuksittain (als_group lähempänä toisiaan olevat linjat samaan ryhmään)
@@ -142,7 +154,7 @@ PROFILES = {
     # kattavuus parani 4/5 kohteessa, roskaa vähän lisää. 1,8: roskaa selvästi enemmän (Käärmetalo +85 m).
     # Pensassuodatin pois: oikeissa Stonex-pilvissä pitkienkin seinien julkisivu oli ohut ja kohiseva (Kruna2
     # 30 m, Katajaharju 17 m); viidessä kohteessa suodatin pudotti seiniä yhtä paljon kuin roskaa.
-    "stonex": dict(voxel=0.03, wall_cell=0.03, cover_top=2.0, cover_near=False, facade_max=3.5, inlier_tol=0.03,
+    "stonex": dict(arc_max_r=15.0, voxel=0.03, wall_cell=0.03, cover_top=2.0, cover_near=False, facade_max=3.5, inlier_tol=0.03,
                    wall_offset=0.04, outline_offset=0.06, facade_tol=0.01,
                    # Pensassuodatin vain lyhyille ja hyvin ohuille: väljemmin (0,5 m, 15 mm, kaikki pituudet) se
                    # pudotti Kruna2:sta ja Katajaharjusta pitkiä oikeita seiniä (5 kohdetta: 141 m seinää). Näin
@@ -207,7 +219,27 @@ class Segment:
 
     @property
     def length(self) -> float:
+        if "kaari" in self.info:
+            return float(self.info["kaari"][2] * (self.info["kaari"][4] - self.info["kaari"][3]))
         return float(np.linalg.norm(self.p1 - self.p0))
+
+
+def arc_points(seg: Segment, step: float = 0.25) -> np.ndarray:
+    """Linjan pisteet: suoralla päät, kaarella (info["kaari"] = keski x, y, säde, alku- ja loppukulma
+    vastapäivään [rad]) pisteet enintään step välein."""
+    if "kaari" not in seg.info:
+        return np.array([seg.p0[:2], seg.p1[:2]])
+    cx, cy, r, a0, a1 = seg.info["kaari"]
+    t = np.linspace(a0, a1, max(2, int(np.ceil(r * (a1 - a0) / step)) + 1))
+    return np.c_[cx + r * np.cos(t), cy + r * np.sin(t)]
+
+
+def make_arc(cx: float, cy: float, r: float, a0: float, a1: float, points: np.ndarray) -> Segment:
+    """Kaari Segmenttinä: p0 ja p1 kaaren päät, direction jänteen suunta."""
+    p0, p1 = np.array([cx + r * np.cos(a0), cy + r * np.sin(a0)]), np.array([cx + r * np.cos(a1), cy + r * np.sin(a1)])
+    d = (p1 - p0) / max(np.linalg.norm(p1 - p0), 1e-9)
+    return Segment(p0, p1, d, float(np.array([-d[1], d[0]]) @ p0), points, snapped=True,
+                   info={"kaari": (float(cx), float(cy), float(r), float(a0), float(a1))})
 
 
 def ground_sample(xyz: np.ndarray, n: int = 5_000_000, chunk: int = 5_000_000) -> np.ndarray:
@@ -1427,6 +1459,7 @@ def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segme
     band = _band(xyz, height, lo, hi)
     det = voxel_thin(band, opt.voxel) if opt.voxel > 0 else band
     cells = wall_cells(det, height(det), opt)
+    all_cells = cells
     del det
     ropt = replace(opt, min_density=min(opt.min_density, 0.6 / opt.wall_cell))
     cells = cells[stable_cells(cells, ropt)]
@@ -1463,12 +1496,14 @@ def extract_walls(xyz: np.ndarray, opt: WallOptions | None = None) -> list[Segme
             segs = [s for s in segs if not _bush(s, opt)]
         if opt.fence_top > 0:
             segs = close_corners(_trim_fences(segs, pts, rel, index, opt), opt)
-    if opt.bridge_max > 0 and not opt.indoor and segs:
-        segs = segs + _bridge_upper(segs, xyz, height, opt)
         # Pitkä seinä, jolta julkisivu löytyi, on varma suunnasta riippumatta (vinot korttelit)
         for s in segs:
             if s.length >= opt.sure_length and s.info.get("kohina") is not None:
                 s.snapped = True
+    if opt.bridge_max > 0 and not opt.indoor and segs:
+        segs = segs + _bridge_upper(segs, xyz, height, opt)
+    if opt.arc_max_r > 0 and segs:
+        segs = fit_arcs(all_cells, segs, opt)
     return segs
 
 
@@ -1503,6 +1538,9 @@ def facade_check(xyz: np.ndarray, segments: list[Segment], opt: WallOptions | No
     normals = outward_normals(segments)
     out = []
     for seg, n in zip(segments, normals):
+        if "kaari" in seg.info:            # julkisivun tarkistus vain suorille
+            out.append(np.zeros((0, 2)))
+            continue
         sign = 1.0 if seg.normal @ n >= 0 else -1.0
         _, sv, tv, hv = _near_points(seg, pts, rel, index, opt, pad=0.0)
         order = np.argsort(sv)             # kohdan ikkuna lajitellusta (nopea pitkälläkin seinällä)
@@ -1600,6 +1638,208 @@ def _comparable(a: Segment, b: Segment) -> bool:
     short, long_ = (a, b) if a.length <= b.length else (b, a)
     ns, nl = short.info.get("kohina"), long_.info.get("kohina")
     return short.length >= 0.5 * long_.length and (ns is None or nl is None or ns <= nl + 0.005)
+
+
+def _seg_dist(pts: np.ndarray, s: Segment) -> np.ndarray:
+    d = s.p1[:2] - s.p0[:2]
+    t = np.clip((pts - s.p0[:2]) @ d / max(d @ d, 1e-12), 0, 1)
+    return np.linalg.norm(pts - (s.p0[:2] + t[:, None] * d), axis=1)
+
+
+def _clusters(pts: np.ndarray, step: float = 0.3) -> list[np.ndarray]:
+    """Pisteiden yhtenäiset ryhmät (step-ruudut, 8-naapurit)."""
+    keys: dict = {}
+    for n, k in enumerate(map(tuple, np.floor(pts / step).astype(np.int64))):
+        keys.setdefault(k, []).append(n)
+    seen, out = set(), []
+    for k in keys:
+        if k in seen:
+            continue
+        stack, comp = [k], []
+        seen.add(k)
+        while stack:
+            c = stack.pop()
+            comp += keys[c]
+            for nb in ((c[0] + i, c[1] + j) for i in (-1, 0, 1) for j in (-1, 0, 1)):
+                if nb in keys and nb not in seen:
+                    seen.add(nb)
+                    stack.append(nb)
+        out.append(np.array(comp))
+    return out
+
+
+def _circle_fit(p: np.ndarray) -> tuple[np.ndarray, float]:
+    """Ympyrä pienimmän neliösumman mukaan (Kåsa)."""
+    sol = np.linalg.lstsq(np.c_[2 * p, np.ones(len(p))], (p ** 2).sum(1), rcond=None)[0]
+    return sol[:2], float(np.sqrt(max(sol[2] + sol[:2] @ sol[:2], 0.0)))
+
+
+def _line_rms(p: np.ndarray) -> float:
+    if len(p) < 5:
+        return np.inf
+    return float(np.linalg.svd(p - p.mean(0), compute_uv=False)[1] / np.sqrt(len(p)))
+
+
+def _arc_span(seed: np.ndarray, c: np.ndarray, more: np.ndarray, step: float) -> tuple[float, float]:
+    """Kaaren kulmaväli (a0, a1), a1 > a0: siemenpisteiden suurimman kulma-aukon ulkopuoli, jota jatketaan
+    muiden ympyrällä olevien pisteiden (more) kautta niin kauan kuin seuraava on enintään step (rad) päässä."""
+    ang = np.sort(np.arctan2(seed[:, 1] - c[1], seed[:, 0] - c[0]))
+    gaps = np.diff(np.r_[ang, ang[0] + 2 * np.pi])
+    k = int(np.argmax(gaps))
+    a0 = float(ang[(k + 1) % len(ang)])
+    a1 = a0 + 2 * np.pi - float(gaps[k])
+    rel = np.sort(np.mod(np.arctan2(more[:, 1] - c[1], more[:, 0] - c[0]) - a0, 2 * np.pi))
+    hi = a1 - a0
+    for x in rel[rel > hi]:                # eteenpäin
+        if x - hi > step or x > 2 * np.pi - 1e-6:
+            break
+        hi = x
+    lo = 2 * np.pi
+    for x in rel[::-1][rel[::-1] > hi]:    # taaksepäin (kulmat a0:sta taaksepäin ovat lähellä 2π)
+        if lo - x > step:
+            break
+        lo = x
+    return a0 - (2 * np.pi - lo if lo < 2 * np.pi else 0.0), a0 + hi
+
+
+def fit_arcs(cells: np.ndarray, segs: list[Segment], opt: WallOptions, long: float = 2.5,
+             tol: float = 0.03, debug: list | None = None) -> list[Segment]:
+    """Kaaret (pyöreä torni, erkkeri, kaareva julkisivu) seinäsoluista (wall_cells), ks. WallOptions.arc_*.
+    Ympyrä haetaan RANSACilla soluryhmistä, joita pitkät (long) suorat eivät selitä, ja kaari jatketaan kaikkia
+    soluja pitkin. Kaaren kohdan jännepalat (enintään 0,35 m ympyrästä) poistetaan ja päät liitetään viereisiin
+    suoriin, jos suoran pää on ja suora leikkaa ympyrän enintään 1 m kaaren päästä. Palauttaa linjat kaarineen.
+    Rajoitus: kaari ei tiedä talon sisäpuolta, joten julkisivun takainen pyöristetty syvennys voi jatkua
+    julkisivulinjan yli (MLS 5318_11: yksi 232° kaari); julkisivun läpi katkaisu pudotti ulkonevat erkkerit."""
+    if opt.arc_max_r <= 0 or len(cells) < 50:
+        return segs
+    rng = np.random.default_rng(opt.seed)
+    cells = cells[:, :2]
+    free = np.ones(len(cells), bool)
+    for s in segs:
+        if s.length >= long:
+            free &= _seg_dist(cells, s) > 0.08
+    pts = cells[free]
+    arcs = []
+    for comp in _clusters(pts):
+        q = pts[comp]
+        if len(q) < 40 or np.linalg.norm(np.ptp(q, 0)) < opt.arc_min_len:
+            continue
+        best, circle = 0, None
+        for _ in range(300):
+            a, b, c = q[rng.choice(len(q), 3, replace=False)]
+            m = 2 * np.array([b - a, c - a])
+            if abs(np.linalg.det(m)) < 1e-9:
+                continue
+            cen = np.linalg.solve(m, [b @ b - a @ a, c @ c - a @ a])
+            r = np.linalg.norm(a - cen)
+            if not opt.arc_min_r <= r <= opt.arc_max_r:
+                continue
+            n = int((np.abs(np.linalg.norm(q - cen, axis=1) - r) < tol).sum())
+            if n > best:
+                best, circle = n, (cen, r)
+        if circle is None:
+            continue
+        cen, r = _circle_fit(q[np.abs(np.linalg.norm(q - circle[0], axis=1) - circle[1]) < tol])
+        if not opt.arc_min_r <= r <= opt.arc_max_r:
+            continue
+        # Jatketaan kaikkia soluja pitkin (pitkä jänne voi selittää osan kaaresta)
+        d_all = np.abs(np.linalg.norm(cells - cen, axis=1) - r)
+        on = cells[d_all < tol]
+        seed = q[np.abs(np.linalg.norm(q - cen, axis=1) - r) < tol]
+        if len(seed) < 40:
+            continue
+        on = on[np.min(np.linalg.norm(on[:, None, :] - seed[None, ::max(1, len(seed) // 50), :], axis=2), axis=1)
+                < 3.0] if len(on) > len(seed) else seed
+        # siemenen kaari, jatkettuna muita ympyrän soluja pitkin enintään 0,5 m (tai 10°) askelin
+        a0, a1 = _arc_span(seed, cen, on, max(np.radians(10.0), 0.5 / r))
+        on = on[np.mod(np.arctan2(on[:, 1] - cen[1], on[:, 0] - cen[0]) - a0, 2 * np.pi) <= a1 - a0]
+        info = dict(r=r, keski=cen + 0, n=len(seed))
+        # kaaren kattavuus 0,25 m paloina
+        rel_on = np.mod(np.arctan2(on[:, 1] - cen[1], on[:, 0] - cen[0]) - a0, 2 * np.pi)
+        nb = max(1, int(r * (a1 - a0) / 0.25))
+        cover = len(np.unique(np.minimum((rel_on / (a1 - a0) * nb).astype(int), nb - 1))) / nb
+        info.update(deg=np.degrees(a1 - a0), cover=cover)
+        if np.degrees(a1 - a0) < opt.arc_min_deg or r * (a1 - a0) < opt.arc_min_len:
+            debug is not None and debug.append({**info, "syy": "lyhyt"})
+            continue
+        if cover < opt.arc_cover:
+            debug is not None and debug.append({**info, "syy": "harva"})
+            continue
+        rms = float(np.sqrt(np.mean((np.linalg.norm(on - cen, axis=1) - r) ** 2)))
+        th = np.mod(np.arctan2(on[:, 1] - cen[1], on[:, 0] - cen[0]) - a0, 2 * np.pi)
+        srt = on[np.argsort(th)]
+        two = min(np.sqrt((_line_rms(srt[:k]) ** 2 * k + _line_rms(srt[k:]) ** 2 * (len(srt) - k)) / len(srt))
+                  for k in np.linspace(5, len(srt) - 5, 15).astype(int))
+        info.update(suhde=two / max(rms, 1e-9))
+        if two < opt.arc_corner * rms:
+            debug is not None and debug.append({**info, "syy": "nurkka"})
+            continue                       # nurkka tai porrastus
+        rel = np.mod(np.arctan2(cells[:, 1] - cen[1], cells[:, 0] - cen[0]) - a0, 2 * np.pi)
+        ring = (np.abs(np.linalg.norm(cells - cen, axis=1) - r) < 0.3) & (rel <= a1 - a0)
+        info.update(osuus=(d_all[ring] < tol).sum() / max(1, ring.sum()))
+        if (d_all[ring] < tol).sum() < opt.arc_share * ring.sum():
+            debug is not None and debug.append({**info, "syy": "hajallaan"})
+            continue                       # hajallaan: puu, pensas
+        debug is not None and debug.append({**info, "syy": "OK"})
+        if any(np.hypot(cen[0] - k.info["kaari"][0], cen[1] - k.info["kaari"][1]) < 0.3 and
+               abs(r - k.info["kaari"][2]) < 0.3 for k in arcs):
+            continue
+        arcs.append(make_arc(cen[0], cen[1], r, a0, a1, on))
+    if not arcs:
+        return segs
+    out = []
+    for s in segs:
+        chord = False
+        for k in arcs:
+            cx, cy, r, a0, a1 = k.info["kaari"]
+            if chord:
+                break
+            sp = np.linspace(s.p0[:2], s.p1[:2], 5)
+            rel = np.mod(np.arctan2(sp[:, 1] - cy, sp[:, 0] - cx) - a0 + np.radians(5), 2 * np.pi)
+            if s.length < r * (a1 - a0) + 0.5 and np.all(np.abs(np.hypot(sp[:, 0] - cx, sp[:, 1] - cy) - r) < 0.35) \
+                    and np.all(rel <= a1 - a0 + np.radians(10)):
+                chord = True
+            elif len(s.points) >= 10:      # linjan omat pisteet ovat enimmäkseen kaarella (tangentti, jatkettu jänne)
+                q = np.asarray(s.points)[:, :2]
+                qa = np.mod(np.arctan2(q[:, 1] - cy, q[:, 0] - cx) - a0 + np.radians(5), 2 * np.pi)
+                chord = np.mean((np.abs(np.hypot(q[:, 0] - cx, q[:, 1] - cy) - r) < 0.1)
+                                & (qa <= a1 - a0 + np.radians(10))) > 0.6
+        if not chord:
+            out.append(s)
+    valmiit = []
+    for k in arcs:                         # päät viereisiin suoriin
+        cx, cy, r, a0, a1 = k.info["kaari"]
+        c = np.array([cx, cy])
+        for end in (0, 1):
+            e = c + r * np.array([np.cos((a0, a1)[end]), np.sin((a0, a1)[end])])
+            best = None
+            for s in out:
+                for j, p in enumerate((s.p0, s.p1)):
+                    if np.linalg.norm(p[:2] - e) > 1.0:
+                        continue
+                    # suoran ja ympyrän leikkauspiste lähinnä kaaren päätä
+                    d, f = s.direction[:2], s.p0[:2] - c
+                    bq, cq = 2 * d @ f, f @ f - r * r
+                    disc = bq * bq - 4 * cq
+                    if disc < 0:
+                        continue
+                    for t in ((-bq - np.sqrt(disc)) / 2, (-bq + np.sqrt(disc)) / 2):
+                        x = s.p0[:2] + t * d
+                        if np.linalg.norm(x - e) <= 1.0 and (best is None or np.linalg.norm(x - e) < best[0]):
+                            best = (np.linalg.norm(x - e), s, j, x)
+            if best is not None:
+                _, s, j, x = best
+                if j == 0:
+                    s.p0 = np.r_[x, s.p0[2:]]
+                else:
+                    s.p1 = np.r_[x, s.p1[2:]]
+                ang = float(np.arctan2(x[1] - cy, x[0] - cx))
+                if end == 0:
+                    a0 = a1 - np.mod(a1 - ang, 2 * np.pi)
+                else:
+                    a1 = a0 + np.mod(ang - a0, 2 * np.pi)
+        valmiit.append(make_arc(cx, cy, r, a0, a1, k.points))
+    return out + valmiit
 
 
 def _bridge_candidates(segs: list[Segment], opt: WallOptions) -> list[tuple[float, int, int]]:
@@ -2101,6 +2341,9 @@ def tile_core(segs: list[Segment], base: np.ndarray, tile: float,
         pts = s.points[:, :2]
         _, first = np.unique(np.floor(pts / 0.05).astype(np.int64), axis=0, return_index=True)
         s.points = pts[np.sort(first)] + base
+        if "kaari" in s.info:
+            cx, cy, r, a0, a1 = s.info["kaari"]
+            s.info["kaari"] = (cx + base[0], cy + base[1], r, a0, a1)
         out.append((s, depth))
     return out
 
@@ -2152,7 +2395,12 @@ def roof_share(segs: list[Segment], roof: np.ndarray, cell: float, dist: float, 
     out = np.zeros(len(segs))
     for i, s in enumerate(segs):
         n = max(2, int(np.ceil(s.length / step)) + 1)
-        p = s.p0[:2] + np.linspace(0, 1, n)[:, None] * (s.p1[:2] - s.p0[:2]) + np.asarray(offset, float)
+        if "kaari" in s.info:
+            a = arc_points(s, s.length / max(n - 1, 1))
+            p = a + np.asarray(offset, float)
+        else:
+            p = s.p0[:2] + np.linspace(0, 1, n)[:, None] * (s.p1[:2] - s.p0[:2]) + np.asarray(offset, float)
+        n = len(p)
         q = np.floor(p / cell).astype(np.int64)
         inside = (q[:, 0] >= 0) & (q[:, 0] < nx) & (q[:, 1] >= 0) & (q[:, 1] < ny)
         hit = np.zeros(n, bool)
@@ -2168,7 +2416,7 @@ def measured_pieces(segments: list[Segment], gap: float = 0.5, tol: float = 0.1)
     out = []
     for s in segments:
         L = s.length
-        if L < 1e-9:
+        if L < 1e-9 or "kaari" in s.info:       # kaaret kirjoitetaan omina (write_dxf, write_dxf_r12)
             continue
         d = (s.p1 - s.p0) / L
         t = np.sort((s.points - s.p0) @ d) if len(s.points) else np.zeros(0)
@@ -2205,15 +2453,16 @@ def _pieces_as_segments(pieces) -> list[Segment]:
 DXF_LAYERS = {"SEINA": (7, "CONTINUOUS"), "EPAVARMA": (1, "CONTINUOUS"), "PAATELTY": (8, "DASHED")}
 
 
-def write_dxf_r12(path, polylines) -> None:
+def write_dxf_r12(path, polylines, arcs=()) -> None:
     """Murtoviivat DXF R12:ksi ilman lisäkirjastoja (CloudComparen Pythonissa ei ole ezdxf:ää):
-    polylines = [(layer, [(x, y, z), ...], suljettu)]. Layer-taulukossa värit ja PAATELTY-layerin
+    polylines = [(layer, [(x, y, z), ...], suljettu)], arcs = [(layer, (x, y, z) keskipiste, säde, alku- ja
+    loppukulma asteina vastapäivään)] ARC-elementteinä. Layer-taulukossa värit ja PAATELTY-layerin
     katkoviiva (DXF_LAYERS); muut layerit valkoisina. QGIS, MicroStation ja AutoCAD lukevat."""
     def r(*pairs):
         return [str(v) for pair in pairs for v in pair]
 
     layers = dict(DXF_LAYERS)
-    for layer, _, _ in polylines:
+    for layer in [p[0] for p in polylines] + [a[0] for a in arcs]:
         layers.setdefault(layer, (7, "CONTINUOUS"))
     out = r(("0", "SECTION"), ("2", "TABLES"), ("0", "TABLE"), ("2", "LTYPE"), ("70", 2),
             ("0", "LTYPE"), ("2", "CONTINUOUS"), ("70", 0), ("3", "Solid line"), ("72", 65), ("73", 0), ("40", "0.0"),
@@ -2229,6 +2478,9 @@ def write_dxf_r12(path, polylines) -> None:
             out += r(("0", "VERTEX"), ("8", layer), ("10", f"{x:.4f}"), ("20", f"{y:.4f}"), ("30", f"{z:.4f}"),
                      ("70", 32))
         out += r(("0", "SEQEND"), ("8", layer))
+    for layer, (x, y, z), radius, a0, a1 in arcs:
+        out += r(("0", "ARC"), ("8", layer), ("62", layers[layer][0]), ("10", f"{x:.4f}"), ("20", f"{y:.4f}"),
+                 ("30", f"{z:.4f}"), ("40", f"{radius:.4f}"), ("50", f"{a0:.4f}"), ("51", f"{a1:.4f}"))
     out += r(("0", "ENDSEC"), ("0", "EOF"))
     with open(path, "w", encoding="ascii", newline="\r\n") as f:
         f.write("\n".join(out) + "\n")
@@ -2256,6 +2508,10 @@ def write_dxf(path, segments: list[Segment], z: float = 0.0, targets: dict[str, 
             closed = len(poly) > 3 and np.linalg.norm(poly[0] - poly[-1]) < 0.002
             pts = [tuple(p + off) for p in (poly[:-1] if closed else poly)]
             msp.add_lwpolyline(pts, close=closed, dxfattribs={"layer": layer, "elevation": z})
+    for s in segments:
+        if "kaari" in s.info:
+            cx, cy, r, a0, a1 = s.info["kaari"]
+            msp.add_arc((cx + off[0], cy + off[1], z), r, np.degrees(a0), np.degrees(a1), dxfattribs={"layer": "SEINA"})
     for name, p in (targets or {}).items():
         q = np.asarray(p, float)[:2] + off
         msp.add_point((q[0], q[1], z), dxfattribs={"layer": "TAHYKSET"})

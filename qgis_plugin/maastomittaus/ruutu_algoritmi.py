@@ -14,7 +14,7 @@ from qgis.core import (QgsFeature, QgsFeatureSink, QgsGeometry, QgsPointXY, QgsP
                        QgsCoordinateReferenceSystem, QgsRectangle, Qgis)
 
 from . import ruututyo, ydin
-from .pilvi_algoritmi import ALS_SEINALUOKKA, PROFIILIT, _dxf_viivat, _m
+from .pilvi_algoritmi import ALS_SEINALUOKKA, PROFIILIT, _dxf_kaaret, _dxf_viivat, _m, kaari_geometria
 from .seinalinja_algoritmi import GK25, LUKU, TEKSTI, _cm, _kentat
 from .tyylit import aseta_tyylit
 from .vertailu_algoritmi import _gk25_alue, rajaa_pilvi
@@ -309,15 +309,21 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
         crs = QgsCoordinateReferenceSystem(GK25)
         tulokset_id = {}
         seinat, tulokset_id[self.SEINAT] = self.parameterAsSink(parameters, self.SEINAT, context, RUUTUKENTAT,
-                                                                Qgis.WkbType.LineString, crs)
+                                                                Qgis.WkbType.CompoundCurve, crs)
         poistetut, poistetut_id = self.parameterAsSink(parameters, self.POISTETUT, context, RUUTUKENTAT,
-                                                       Qgis.WkbType.LineString, crs)
+                                                       Qgis.WkbType.CompoundCurve, crs)
         for k, s in enumerate(segs, start=1):
             kohde = seinat if pidetty[k - 1] else poistetut
             if kohde is None:
                 continue
             info = s.info or {}
             korkeus = info.get("korkeus") or (None, None)
+            if "kaari" in info:
+                f = QgsFeature(RUUTUKENTAT)
+                f.setGeometry(kaari_geometria(s, e0, n0))
+                f.setAttributes(["SEINA", round(s.length, 3), f"Seinä {k}"] + [None] * 7
+                                + [None if osuus is None else round(float(osuus[k - 1]), 2)])
+                kohde.addFeature(f, QgsFeatureSink.Flag.FastInsert)
             for a, b, mitattu, varma in sp.measured_pieces([s]):
                 f = QgsFeature(RUUTUKENTAT)
                 f.setGeometry(QgsGeometry.fromPolylineXY([QgsPointXY(a[0] + e0, a[1] + n0),
@@ -333,7 +339,7 @@ class SeinatRuuduittainAlgoritmi(QgsProcessingAlgorithm):
 
         dxf_polku = self.parameterAsFileOutput(parameters, self.DXF, context)
         if dxf_polku and pidetyt:
-            sp.write_dxf_r12(dxf_polku, _dxf_viivat(pidetyt, maa, e0, n0))
+            sp.write_dxf_r12(dxf_polku, _dxf_viivat(pidetyt, maa, e0, n0), _dxf_kaaret(pidetyt, maa, e0, n0))
             feedback.pushInfo(f"DXF: {dxf_polku}")
             tulokset_id[self.DXF] = dxf_polku
         aseta_tyylit(context, [(tulokset_id.get(self.SEINAT), "pilven_seinat"), (poistetut_id, "pilven_seinat")])
