@@ -110,6 +110,11 @@ class WallOptions:
     bridge_cover: float = 0.8    # vähimmäisosuus 0,5 m paloista, joissa yläjulkisivu ...
     bridge_pts: int = 40         # ... vähintään näin monta 5 cm vokselia ...
     bridge_span: float = 1.0     # ... vähintään näin korkealla välillä [m]
+    # Parvekerivi: väliseinien (noin 2 m kohtisuorat palat) päiden välille ei siltaa parvekkeiden etureunaa
+    # pitkin (Postipuisto: kantakartan seinä 0,8 m sisempänä, kaiteet täyttävät yläjulkisivun ehdon). Kun
+    # kumpikin pää on kohtisuoran linjan pää eikä kummassakaan jatku samansuuntainen linja, kohtisuorien
+    # on oltava vähintään näin pitkiä [m].
+    bridge_perp_min: float = 2.5
     # Ilmakeilauksen seinäpisteet (profiili als, extract_walls_als): als_cell-ruudussa on oltava pisteitä
     # vähintään als_span korkeusväliltä (kattoreunan ja räystään yksittäiset pisteet pois), ja linjat
     # yhdistetään rakennuksittain (als_group lähempänä toisiaan olevat linjat samaan ryhmään)
@@ -145,7 +150,8 @@ PROFILES = {
                    bush_span=0.3, bush_noise=0.018, bush_max_len=3.0,
                    # Siltaus: käyttäjän piirtämistä puuttuvista seinistä (4 kohdetta, 233 m) 146 m jäi tunnistamatta
                    # (lasi, sisäänvedot), ja 136 m:llä yläjulkisivu jatkui. Siltaus: linjojen kattamana 33 -> 171 m;
-                   # siltoja 5 kohteessa 756 m, niistä kantakartan ulkopuolella 58 m (osin kartalta puuttuvia taloja).
+                   # siltoja 5 kohteessa 710 m, niistä kantakartan ulkopuolella 51 m (osin kartalta puuttuvia taloja).
+                   # MLS 5318_11 (seinäluokka, tiheydestä stonex): +486 m, kantakartan seinällä 90 %.
                    bridge_max=40.0),
     # Ilmakeilauksen seinäluokka (esim. TerraScanin luokka 13): ylhäältä harva (noin 40 pistettä seinämetrillä),
     # seinä 2D:ssä noin 10 cm paksu viiva. Ei maanpintaa eikä julkisivun tarkennusta.
@@ -1601,6 +1607,13 @@ def _bridge_candidates(segs: list[Segment], opt: WallOptions) -> list[tuple[floa
     Väli on linjan suuntainen (pää osoittaa väliin ja toinen pää on linjan jatkeella) tai kohtisuora."""
     cos_lim, sin_lim = np.cos(np.radians(3.0)), np.sin(np.radians(3.0))
     E = np.array([p for s in segs for p in (s.p0[:2], s.p1[:2])])
+    D = np.array([s.direction[:2] for s in segs for _ in (0, 1)])
+
+    def continues(k, v):
+        """Jatkuuko pisteestä E[k] jokin v:n suuntainen linja (nurkka, jossa julkisivu jatkuu)."""
+        at = np.linalg.norm(E - E[k], axis=1) < 0.002
+        return bool(np.any(at & (np.abs(D @ v) >= cos_lim)))
+
     out = []
     for a in range(len(E)):
         d = np.linalg.norm(E - E[a], axis=1)
@@ -1619,6 +1632,10 @@ def _bridge_candidates(segs: list[Segment], opt: WallOptions) -> list[tuple[floa
                     ok = c <= sin_lim
                 if not ok:
                     break
+            if ok and abs(v @ segs[a // 2].direction) < cos_lim and abs(v @ segs[b // 2].direction) < cos_lim \
+                    and min(segs[a // 2].length, segs[b // 2].length) < opt.bridge_perp_min \
+                    and not (continues(a, v) or continues(b, v)):
+                ok = False
             if ok:
                 out.append((float(d[b]), a, b))
     return sorted(out)

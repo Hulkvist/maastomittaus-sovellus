@@ -199,3 +199,18 @@ def test_no_bridge_without_upper_facade_or_over_existing_wall():
     recess = Segment(np.array([5.0, 0.4]), np.array([6.5, 0.4]), d, 0.4, np.zeros((0, 2)))
     segs, xyz = _bridge_case(rng, middle=[recess])
     assert len(_bridge_upper(segs, xyz, lambda p: p[:, 2], opt)) == 1
+
+
+def test_no_bridge_along_balcony_fronts():
+    """Parvekkeiden väliseinät (2 m kohtisuorat palat 2,4 m välein): ei siltaa etureunaa pitkin, vaikka
+    kaiteet ja lasitukset täyttävät yläjulkisivun ehdon; pitkien päätyseinien välille silta tulee."""
+    from seinat_pilvesta import Segment, _bridge_upper
+
+    rng = np.random.default_rng(23)
+    up = np.array([0.0, 1.0])
+    def wall(x, L):
+        return Segment(np.array([x, 0.0]), np.array([x, L]), up, -x, np.zeros((0, 2)))
+    front = _surface(rng, (0, 0), (2.4, 0), 2, 6)
+    opt = WallOptions(bridge_max=40.0)
+    assert _bridge_upper([wall(0.0, 2.0), wall(2.4, 2.0)], front, lambda p: p[:, 2], opt) == []
+    assert len(_bridge_upper([wall(0.0, 8.0), wall(2.4, 8.0)], front, lambda p: p[:, 2], opt)) == 1
