@@ -1706,8 +1706,10 @@ def fit_arcs(cells: np.ndarray, segs: list[Segment], opt: WallOptions, long: flo
              tol: float = 0.03, debug: list | None = None) -> list[Segment]:
     """Kaaret (pyöreä torni, erkkeri, kaareva julkisivu) seinäsoluista (wall_cells), ks. WallOptions.arc_*.
     Ympyrä haetaan RANSACilla soluryhmistä, joita pitkät (long) suorat eivät selitä, ja kaari jatketaan kaikkia
-    soluja pitkin. Kaaren kohdan jännepalat (enintään 0,35 m ympyrästä) poistetaan ja päät liitetään viereisiin
-    suoriin, jos suoran pää on ja suora leikkaa ympyrän enintään 1 m kaaren päästä. Palauttaa linjat kaarineen.
+    soluja pitkin. Kaaren kohdan jännepalat (enintään 0,35 m ympyrästä) ja tornin sisään työntyvät lyhyet
+    epävarmat palat (Kruna2: V-muoto tornin juurella) poistetaan ja päät liitetään viereisiin
+    suoriin, jos suoran pää on ja suora leikkaa ympyrän enintään 1 m kaaren päästä; muuten enintään 1 m päässä
+    oleva suoran pää liitetään pisteettömällä palalla (PAATELTY, porras kuten kantakartassa). Palauttaa linjat kaarineen.
     Rajoitus: kaari ei tiedä talon sisäpuolta, joten julkisivun takainen pyöristetty syvennys voi jatkua
     julkisivulinjan yli (MLS 5318_11: yksi 232° kaari); julkisivun läpi katkaisu pudotti ulkonevat erkkerit."""
     if opt.arc_max_r <= 0 or len(cells) < 50:
@@ -1804,9 +1806,13 @@ def fit_arcs(cells: np.ndarray, segs: list[Segment], opt: WallOptions, long: flo
                 qa = np.mod(np.arctan2(q[:, 1] - cy, q[:, 0] - cx) - a0 + np.radians(5), 2 * np.pi)
                 chord = np.mean((np.abs(np.hypot(q[:, 0] - cx, q[:, 1] - cy) - r) < 0.1)
                                 & (qa <= a1 - a0 + np.radians(10))) > 0.6
+        for k in arcs if not chord else ():  # lyhyt epävarma pala, joka työntyy tornin sisään
+            cx, cy, r = k.info["kaari"][:3]
+            if not s.snapped and s.length < 2.0 and min(np.hypot(p[0] - cx, p[1] - cy) for p in (s.p0, s.p1)) < r - 0.3:
+                chord = True
         if not chord:
             out.append(s)
-    valmiit = []
+    valmiit, liitokset = [], []
     for k in arcs:                         # päät viereisiin suoriin
         cx, cy, r, a0, a1 = k.info["kaari"]
         c = np.array([cx, cy])
@@ -1827,6 +1833,15 @@ def fit_arcs(cells: np.ndarray, segs: list[Segment], opt: WallOptions, long: flo
                         x = s.p0[:2] + t * d
                         if np.linalg.norm(x - e) <= 1.0 and (best is None or np.linalg.norm(x - e) < best[0]):
                             best = (np.linalg.norm(x - e), s, j, x)
+            if best is None:               # ei leikkausta: lähin suoran pää (enintään 1 m) liitospalalla (porras)
+                near = [(np.linalg.norm(p[:2] - e), p[:2]) for s in out if "kaari" not in s.info
+                        for p in (s.p0, s.p1) if np.linalg.norm(p[:2] - e) <= 1.0]
+                if near:
+                    q = min(near, key=lambda t: t[0])[1]
+                    if np.linalg.norm(q - e) > 0.02:
+                        d = (q - e) / np.linalg.norm(q - e)
+                        liitokset.append(Segment(e.copy(), q.copy(), d, float(np.array([-d[1], d[0]]) @ e),
+                                                 np.zeros((0, 2)), snapped=True))
             if best is not None:
                 _, s, j, x = best
                 if j == 0:
@@ -1839,7 +1854,7 @@ def fit_arcs(cells: np.ndarray, segs: list[Segment], opt: WallOptions, long: flo
                 else:
                     a1 = a0 + np.mod(ang - a0, 2 * np.pi)
         valmiit.append(make_arc(cx, cy, r, a0, a1, k.points))
-    return out + valmiit
+    return out + valmiit + liitokset
 
 
 def _bridge_candidates(segs: list[Segment], opt: WallOptions) -> list[tuple[float, int, int]]:
