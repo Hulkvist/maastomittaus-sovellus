@@ -214,3 +214,62 @@ def test_no_bridge_along_balcony_fronts():
     opt = WallOptions(bridge_max=40.0)
     assert _bridge_upper([wall(0.0, 2.0), wall(2.4, 2.0)], front, lambda p: p[:, 2], opt) == []
     assert len(_bridge_upper([wall(0.0, 8.0), wall(2.4, 8.0)], front, lambda p: p[:, 2], opt)) == 1
+
+
+def _cylinder(rng, c, r, a0, a1, z0, z1, density=3000, noise=0.004):
+    """Pyöreä pystypinta (keskipiste c, säde r, kulmat a0–a1 rad)."""
+    n = int(r * (a1 - a0) * (z1 - z0) * density)
+    t = rng.uniform(a0, a1, n)
+    rr = r + rng.normal(0, noise, n)
+    return np.column_stack([c[0] + rr * np.cos(t), c[1] + rr * np.sin(t), rng.uniform(z0, z1, n)])
+
+
+def test_round_tower_is_one_arc():
+    """Pyöreä torni (r 2,5 m) talon eteläseinässä: yksi kaari oikealla säteellä, ei jännepaloja, ja
+    kirjoitetaan DXF:ään ARC-elementtinä."""
+    from seinat_pilvesta import write_dxf_r12
+
+    rng = np.random.default_rng(31)
+    south = [_surface(rng, (0, 0), (3.5, 0), 0, 3), _surface(rng, (8.5, 0), (12, 0), 0, 3),
+             _cylinder(rng, (6.0, 0.0), 2.5, np.pi, 2 * np.pi, 0, 3)]
+    walls = [_surface(rng, (12, 0), (12, 8), 0, 3), _surface(rng, (12, 8), (0, 8), 0, 3),
+             _surface(rng, (0, 8), (0, 0), 0, 3)]
+    g = rng.uniform((-5, -6), (17, 13), (120_000, 2))
+    g = g[~(np.all((g > (0, 0)) & (g < (12, 8)), axis=1) | (np.hypot(g[:, 0] - 6, g[:, 1]) < 2.5))]
+    xyz = np.vstack([np.column_stack([g, rng.normal(0, 0.004, len(g))])] + walls + south)
+    segs = extract_walls(xyz, WallOptions.for_cloud(xyz, "stonex"))
+    arcs = [s for s in segs if "kaari" in s.info]
+    assert len(arcs) == 1, [(s.p0, s.p1) for s in segs]
+    cx, cy, r, a0, a1 = arcs[0].info["kaari"]
+    assert abs(r - 2.5) < 0.05 and np.hypot(cx - 6, cy) < 0.05 and np.degrees(a1 - a0) > 150
+    chords = [s for s in segs if "kaari" not in s.info and np.hypot(*((s.p0 + s.p1)[:2] / 2 - (6, -1.5))) < 1.5]
+    assert not chords, [(s.p0, s.p1) for s in chords]
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        write_dxf_r12(os.path.join(d, "t.dxf"), [], [("SEINA", (cx, cy, 1.0), r, np.degrees(a0), np.degrees(a1))])
+        assert "\nARC\n" in open(os.path.join(d, "t.dxf")).read().replace("\r", "")
+
+
+def test_no_arcs_on_rectangular_house():
+    """Suorakulmaisen talon nurkat ja ikkunat eivät tee kaaria (Stonex-profiili)."""
+    rng = np.random.default_rng(32)
+    south = []
+    for x in range(0, 12, 2):
+        south += [_surface(rng, (x, 0), (x + 0.4, 0), 0, 3), _surface(rng, (x + 0.4, 0), (x + 1.6, 0), 0, 0.9),
+                  _surface(rng, (x + 0.4, 0), (x + 1.6, 0), 2.1, 3), _surface(rng, (x + 1.6, 0), (x + 2, 0), 0, 3)]
+    xyz = _house(rng, south)
+    segs = extract_walls(xyz, WallOptions.for_cloud(xyz, "stonex"))
+    assert not [s for s in segs if "kaari" in s.info]
+
+
+def test_long_skewed_wall_is_sure_without_bridging():
+    """Pitkä julkisivullinen linja on varma (SEINA) myös vinossa, vaikka siltaus on pois (iPhone-profiili):
+    silmukka oli vahingossa siltauksen ehdon sisällä."""
+    rng = np.random.default_rng(33)
+    walls = [_surface(rng, (0, 0), (12, 0), 0, 3), _surface(rng, (12, 0), (14, 8), 0, 3),
+             _surface(rng, (14, 8), (0, 8), 0, 3), _surface(rng, (0, 8), (0, 0), 0, 3)]
+    g = rng.uniform((-4, -4), (18, 12), (80_000, 2))
+    xyz = np.vstack([np.column_stack([g, rng.normal(0, 0.004, len(g))])] + walls)
+    segs = extract_walls(xyz, WallOptions.for_cloud(xyz, "iphone"))
+    skew = [s for s in segs if s.length > 5 and 0.1 < abs(s.direction[0]) < 0.9]
+    assert skew and all(s.snapped for s in skew), [(s.p0, s.p1, s.snapped) for s in segs]

@@ -46,6 +46,8 @@ def _pisteet(geometria):
     ole korkeuksia (2D tai kaikki 0, kuten DXF:n tasoviivoissa yleensä)."""
     osat = []
     for osa in geometria.constParts():
+        if osa.hasCurvedSegments():        # kaari (pilven seinälinjat): pisteiksi, ei kolmeksi ohjauspisteeksi
+            osa = osa.segmentize()
         pisteet = [(p.x(), p.y(), p.z() if osa.is3D() and not math.isnan(p.z()) else None) for p in osa.vertices()]
         if all(z in (None, 0.0) for _, _, z in pisteet):
             pisteet = [(e, n, None) for e, n, _ in pisteet]
