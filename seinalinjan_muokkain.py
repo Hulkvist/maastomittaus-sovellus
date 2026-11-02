@@ -8,6 +8,9 @@ yläpuolen työkalu valitaan napilla, joten oikeaa painiketta, tuplaklikkausta j
 - Poista: kärjen tai janan napautus valitsee sen, ja poisto vahvistetaan.
 - Suorakulmio: kolmen pisteen tai kärjen napautus täydentää ne suorakulmioksi.
 - Uusi viiva, Jatka ja Yhdistä.
+- Mittaa: kahden pisteen tai kärjen etäisyys; Siirrä-tilassa napautus näyttää janan pituuden ja kärjen kulman.
+- Sivumitta: suorakulmainen mittaus kartalla (A, B, a- ja b-mitta) = irrallinen laskettu piste.
+- Kumoa: viimeisin muokkaus pois.
 
 Hiirellä vanhat pikatoiminnot toimivat edelleen: viivan klikkaus = uusi kärki, oikea klikkaus = poista,
 tuplaklikkaus = suorakulmion kulma, Esc = peruuta. Kynällä ja sormella napsahdussäde on isompi.
@@ -28,7 +31,7 @@ NAPSAHDUS_PX = 12        # hiirellä kärki napsahtaa pisteeseen tätä lähemp�
 NAPSAHDUS_KYNA_PX = 24   # kynällä ja sormella (kärki jää kynän alle, napautus osuu epätarkemmin)
 
 _CSS = """
-.slm-kartta { width: 100%; height: min(620px, calc(100vh - 170px)); min-height: 360px; border: 1px solid #ccc;
+.slm-kartta { width: 100%; height: min(620px, calc(100vh - 220px)); min-height: 360px; border: 1px solid #ccc;
               border-radius: 4px; touch-action: none; }
 .slm-kahva { background: transparent; border: none; }
 .slm-karki { position: absolute; left: 8px; top: 8px; width: 12px; height: 12px; box-sizing: border-box;
@@ -46,7 +49,16 @@ _CSS = """
 .slm-tyokalut button.paalla { background: #1f77b4; border-color: #1f77b4; color: #fff; font-weight: 600; }
 .slm-tyokalut button.vahva { background: #d62728; border-color: #d62728; color: #fff; font-weight: 600; }
 .slm-tyokalut button.valmis { background: #2ca02c; border-color: #2ca02c; color: #fff; font-weight: 600; }
-.slm-tyokalut .slm-ohje { font-size: 14px; margin: 6px 4px 2px; color: #222; }
+/* Ohje ja toimintorivi vievät aina saman tilan: kartta ei hypi kynän alla työkalun vaihtuessa */
+.slm-tyokalut .slm-ohje { font-size: 14px; margin: 6px 4px 2px; color: #222; min-height: 2.6em; }
+.slm-toiminnot { min-height: 48px; }
+.slm-tyokalut button:disabled { opacity: .4; cursor: default; }
+.slm-tyokalut button.kumoa { float: right; }
+.slm-sivu { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 15px; margin: 0 4px; }
+.slm-sivu input { font-size: 16px; width: 90px; min-height: 40px; padding: 4px 8px; border: 1px solid #999;
+                  border-radius: 6px; }
+.slm-ab { background: #9467bd; color: #fff; border-radius: 50%; font: bold 13px sans-serif; text-align: center;
+          line-height: 22px; box-shadow: 0 0 0 2px #fff; }
 .slm-piirtaa { cursor: crosshair !important; }
 .slm-kulma { background: #ff7f0e; color: #fff; border-radius: 50%; font: bold 14px sans-serif;
              text-align: center; line-height: 22px; box-shadow: 0 0 0 2px #fff; }
@@ -75,7 +87,7 @@ async function lataaLeaflet() {
 
 const TYOKALUT = [["siirra", "✋ Siirrä"], ["lisaa", "+ Lisää kärki"], ["poista", "🗑 Poista"],
                   ["suorakulmio", "∟ Suorakulmio"], ["piirra", "✏ Uusi viiva"], ["jatka", "⇥ Jatka"],
-                  ["yhdista", "✕ Yhdistä"]];
+                  ["yhdista", "✕ Yhdistä"], ["mittaa", "📏 Mittaa"], ["sivumitta", "⊥ Sivumitta"]];
 const OHJEET = {
   siirra: "Raahaa kärkeä: se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen (vihreä). "
     + "Napautus näyttää kärjen tai viivan tiedot.",
@@ -86,7 +98,22 @@ const OHJEET = {
     + "napautus sulkee viivan.",
   jatka: "Napauta avointa viivaa sen pään läheltä, jota jatketaan lähimpään viivaan.",
   yhdista: "Napauta ensimmäistä avointa viivaa yhdistettävän pään läheltä, sitten toista.",
+  mittaa: "Napauta kahta pistettä tai kärkeä: niiden etäisyys (ETRS-GK25).",
+  sivumitta: "Suorakulmainen mittaus: napauta pisteet A ja B (linjan suunta A→B), anna a-mitta (pitkin linjaa "
+    + "A:sta) ja b-mitta (kohtisuoraan, + oikealle). Uusi piste on irrallinen; yhdistä se viivaan itse.",
 };
+
+const mitta = (x) => x.toFixed(3).replace(".", ",");
+const etaisyys = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+// Kärjen kulma (astetta) naapurikärkien välillä tasokoordinaateissa, tai null päätekärjelle
+function karjenKulma(v, j) {
+  const n = v.karjet.length;
+  if (n < 3 || (!v.suljettu && (j === 0 || j === n - 1))) return null;
+  const k = (i) => v.karjet[(i + n) %% n], p = k(j), a = k(j - 1), b = k(j + 1);
+  const u = [a[4] - p[4], a[5] - p[5]], w = [b[4] - p[4], b[5] - p[5]];
+  const c = (u[0] * w[0] + u[1] * w[1]) / (Math.hypot(...u) * Math.hypot(...w));
+  return Math.acos(Math.max(-1, Math.min(1, c))) * 180 / Math.PI;
+}
 
 // Työkalut kartan yläpuolella; tila.tyokalu = valittu työkalu. Kaikki napautukset kulkevat
 // napautus()-funktion kautta, joka etsii kohteen pikseleinä (isompi säde kynällä ja sormella), joten
@@ -98,14 +125,22 @@ function luoTyokalut(L, tila) {
   const div = document.createElement("div");
   div.className = "slm-tyokalut";
   div.innerHTML = TYOKALUT.map(([t, n]) => `<button data-t="${t}">${n}</button>`).join("")
-    + '<div class="slm-ohje"></div>'
+    + '<div class="slm-ohje"></div><div class="slm-toiminnot">'
     + '<button data-a="valmis" class="valmis">✔ Valmis</button>'
     + '<button data-a="vahvista" class="vahva">Poista valittu</button>'
-    + '<button data-a="peruuta">Peruuta</button>';
+    + '<button data-a="peruuta">Peruuta</button>'
+    + '<span class="slm-sivu" style="display:none">a <input data-i="a" inputmode="decimal" placeholder="0,000"> m'
+    + '&nbsp; b <input data-i="b" inputmode="decimal" placeholder="0,000"> m (+ oikealle)'
+    + '<button data-a="lisaapiste" class="valmis">Lisää piste</button></span></div>';
+  div.insertAdjacentHTML("afterbegin", '<button data-a="kumoa" class="kumoa" title="Kumoa viimeisin muokkaus">'
+                                       + "↶ Kumoa</button>");
   for (const b of div.querySelectorAll("[data-t]")) b.onclick = () => aseta(b.dataset.t);
   div.querySelector('[data-a="valmis"]').onclick = () => valmis();
   div.querySelector('[data-a="vahvista"]').onclick = () => { if (tila.valittu) poista(tila.valittu); };
   div.querySelector('[data-a="peruuta"]').onclick = () => aseta("siirra");
+  div.querySelector('[data-a="kumoa"]').onclick = () => tila.setTriggerValue("muokkaus", { tyyppi: "kumoa" });
+  div.querySelector('[data-a="lisaapiste"]').onclick = () => lisaaSivupiste();
+  for (const i of div.querySelectorAll(".slm-sivu input")) i.oninput = () => piirraSivu();
   kartta.getContainer().before(div);
   const nappi = (a) => div.querySelector(`[data-a="${a}"]`);
   const ohje = (teksti) => { div.querySelector(".slm-ohje").textContent = teksti; };
@@ -117,6 +152,9 @@ function luoTyokalut(L, tila) {
     tila.valittu = null;
     tila.kulmat = [];
     tila.yhdistettava = null;
+    tila.mitattavat = [];
+    tila.sivu = [];
+    div.querySelector(".slm-sivu").style.display = "none";
     taso.clearLayers();
     for (const b of div.querySelectorAll("[data-t]")) b.classList.toggle("paalla", b.dataset.t === t);
     nappi("valmis").style.display = t === "piirra" ? "" : "none";
@@ -178,16 +216,100 @@ function luoTyokalut(L, tila) {
   }
   tila.valitseKulma = valitseKulma;
 
+  const merkki = (ll, teksti) => L.marker(ll, { icon: L.divIcon({ className: "slm-ab", iconSize: [22, 22],
+                                                                   html: teksti }), interactive: false }).addTo(taso);
+
+  // Mittaa: kaksi napsahduskohdetta; kolmas aloittaa uuden mittauksen
+  function mittaa(ll) {
+    const k = tila.haku.lahin(ll);
+    if (!k) { ohje("Napauta mitattua pistettä tai viivan kärkeä."); return; }
+    if (tila.mitattavat.length === 2) tila.mitattavat = [];
+    tila.mitattavat.push(k);
+    taso.clearLayers();
+    const [a, b] = tila.mitattavat;
+    merkki(a.ll, "1");
+    if (!b) { ohje(`1: ${a.nimi}. Napauta toista pistettä.`); return; }
+    merkki(b.ll, "2");
+    L.polyline([a.ll, b.ll], { color: "#9467bd", weight: 3, dashArray: "8 6", interactive: false }).addTo(taso);
+    ohje(`${a.nimi} → ${b.nimi}: ${mitta(etaisyys(a.en, b.en))} m (ΔE ${mitta(b.en[0] - a.en[0])}, `
+         + `ΔN ${mitta(b.en[1] - a.en[1])})`);
+  }
+
+  // Sivumitta: A ja B napsahduskohteista, a- ja b-mitta palkista; esikatselu kartalla
+  const luku = (nimi) => {
+    const t = div.querySelector(`[data-i="${nimi}"]`).value.trim().replace(",", ".");
+    return t === "" ? 0 : Number(t);
+  };
+  function sivupiste() {
+    const [A, B] = tila.sivu;
+    const pituus = etaisyys(A.en, B.en);
+    if (pituus < 1e-6) return null;
+    const ue = (B.en[0] - A.en[0]) / pituus, un = (B.en[1] - A.en[1]) / pituus;
+    const a = luku("a"), b = luku("b");
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+    // seinalinja.suorakulmainen_piste: + oikealle A:sta B:hen katsottuna
+    const en = [A.en[0] + a * ue + b * un, A.en[1] + a * un - b * ue];
+    // kartalle yhdenmuotoisuusmuunnoksella A:n ja B:n kautta (Mercator on paikallisesti kulmatarkka)
+    const crs = kartta.options.crs, pa = crs.project(A.ll), pb = crs.project(B.ll);
+    const de = B.en[0] - A.en[0], dn = B.en[1] - A.en[1], qe = en[0] - A.en[0], qn = en[1] - A.en[1];
+    const d2 = de * de + dn * dn, zr = (qe * de + qn * dn) / d2, zi = (qn * de - qe * dn) / d2;
+    const mx = pb.x - pa.x, my = pb.y - pa.y;
+    return { en, a, b, ll: crs.unproject(L.point(pa.x + zr * mx - zi * my, pa.y + zr * my + zi * mx)) };
+  }
+  function piirraSivu() {
+    taso.clearLayers();
+    const [A, B] = tila.sivu;
+    if (A) merkki(A.ll, "A");
+    if (!B) { ohje(A ? `A: ${A.nimi}. Napauta piste B (linjan suunta).` : OHJEET.sivumitta); return; }
+    merkki(B.ll, "B");
+    L.polyline([A.ll, B.ll], { color: "#9467bd", weight: 2, dashArray: "8 6", interactive: false }).addTo(taso);
+    const p = sivupiste();
+    if (!p) { ohje("Tarkista mitat (esim. 1,25)." + (etaisyys(A.en, B.en) < 1e-6 ? " A ja B ovat samassa kohdassa." : ""));
+              return; }
+    L.circleMarker(p.ll, { radius: 7, color: "#d62728", weight: 3, fillOpacity: 0.2, interactive: false }).addTo(taso);
+    ohje(`A ${A.nimi} → B ${B.nimi} (${mitta(etaisyys(A.en, B.en))} m). Uusi piste: E ${p.en[0].toFixed(3)} `
+         + `N ${p.en[1].toFixed(3)}`);
+  }
+  function lisaaSivupiste() {
+    const p = tila.sivu.length === 2 ? sivupiste() : null;
+    if (!p) return;
+    const [A, B] = tila.sivu;
+    laheta({ tyyppi: "sivumitta", a: tila.haku.kohteenSijainti(A), b: tila.haku.kohteenSijainti(B),
+             a_nimi: A.nimi, b_nimi: B.nimi, a_mitta: p.a, b_mitta: p.b });
+  }
+  function sivumitta(ll) {
+    const k = tila.haku.lahin(ll);
+    if (!k) { ohje("Napauta mitattua pistettä tai viivan kärkeä."); return; }
+    if (tila.sivu.length === 2) tila.sivu = [];     // uusi linja
+    tila.sivu.push(k);
+    div.querySelector(".slm-sivu").style.display = tila.sivu.length === 2 ? "" : "none";
+    piirraSivu();
+  }
+  tila.piirraSivu = piirraSivu;
+
   tila.napautus = (ll) => {
     const h = tila.haku;
     const t = tila.tyokalu;
     if (t === "siirra") {
+      // Tiedot ja mitat: kärjen kulma, janan pituus
       const k = h.lahinKarki(ll);
       const j = k ? null : h.lahinJana(ll);
+      taso.clearLayers();
       if (k) {
-        const nimi = k.v.karjet[k.karki][2];
-        ohje(`${k.v.nimi}: kärki ${k.karki + 1}${nimi ? " (piste " + nimi + ")" : ""}. Raahaa siirtääksesi.`);
-      } else ohje(j ? `${j.v.nimi}: jana ${j.jana + 1}.` : OHJEET.siirra);
+        const nimi = k.v.karjet[k.karki][2], kulma = karjenKulma(k.v, k.karki);
+        ohje(`${k.v.nimi}: kärki ${k.karki + 1}${nimi ? " (piste " + nimi + ")" : ""}`
+             + (kulma === null ? "" : `, kulma ${kulma.toFixed(1).replace(".", ",")}°`) + ". Raahaa siirtääksesi.");
+      } else if (j) {
+        const kk = j.v.karjet, a = kk[j.jana], b = kk[(j.jana + 1) %% kk.length];
+        L.polyline([[a[0], a[1]], [b[0], b[1]]], { color: "#9467bd", weight: 7, opacity: 0.5,
+                                                   interactive: false }).addTo(taso);
+        ohje(`${j.v.nimi}: jana ${j.jana + 1} (${a[2] || "kärki " + (j.jana + 1)} – `
+             + `${b[2] || "kärki " + ((j.jana + 1) %% kk.length + 1)}), pituus ${mitta(etaisyys([a[4], a[5]], [b[4], b[5]]))} m.`);
+      } else ohje(OHJEET.siirra);
+    } else if (t === "mittaa") {
+      mittaa(ll);
+    } else if (t === "sivumitta") {
+      sivumitta(ll);
     } else if (t === "lisaa") {
       const j = h.lahinJana(ll);
       if (!j) { ohje("Napauta lähempää viivaa."); return; }
@@ -301,9 +423,13 @@ export default async function (component) {
   const pisteet = data.pisteet;   // [lat, lon, nimi, koodi]
   const muokattavat = data.viivat.filter((v) => !data.valittu || data.valittu === v.nimi);
   // Napsahduskohteet: mitatut pisteet ja kaikkien viivojen kärjet
-  const kohteet = pisteet.map((p, i) => ({ ll: L.latLng(p[0], p[1]), piste: i }));
+  // en = ETRS-GK25 (mitat), nimi näytetään Mittaa- ja Sivumitta-työkaluissa
+  const kohteet = pisteet.map((p, i) => ({ ll: L.latLng(p[0], p[1]), piste: i, en: [p[4], p[5]], nimi: p[2] }));
   data.viivat.forEach((v) => v.karjet.forEach((k, j) =>
-    kohteet.push({ ll: L.latLng(k[0], k[1]), viiva: v.nimi, karki: j })));
+    kohteet.push({ ll: L.latLng(k[0], k[1]), viiva: v.nimi, karki: j, en: [k[4], k[5]],
+                   nimi: `${v.nimi}: kärki ${j + 1}${k[2] ? " (" + k[2] + ")" : ""}` })));
+  const kumoa = tila.kartta.getContainer().previousElementSibling.querySelector('[data-a="kumoa"]');
+  kumoa.disabled = !data.kumottavia;
 
   const sade = () => (tila.kyna ? NAPSAHDUS_KYNA_PX : NAPSAHDUS_PX);
   const px = (ll) => kartta.latLngToContainerPoint(ll);
@@ -486,17 +612,19 @@ def _taustat(api_key, helsinki):
     return taustat
 
 
-def nayta(tulos, kohteet, api_key=None, helsinki=False, valittu=None, key="seinalinjan_muokkain"):
-    """Muokkauskartta. tulos = (muokattu) seinälinja, kohteet = napsahduspisteet(). Palauttaa
-    muokkaustapahtuman (dict) tai None."""
+def nayta(tulos, kohteet, api_key=None, helsinki=False, valittu=None, kumottavia=0, key="seinalinjan_muokkain"):
+    """Muokkauskartta. tulos = (muokattu) seinälinja, kohteet = napsahduspisteet(), kumottavia = muokkausten
+    määrä (Kumoa-nappi). Palauttaa muokkaustapahtuman (dict) tai None."""
     latlon = hk._latlon_muunnin()
     data = {
         "viivat": [{"nimi": v["nimi"], "suljettu": v["suljettu"],
-                    "karjet": [[*latlon(k["e"], k["n"]), str(k.get("nimi") or ""), k.get("laji")] for k in v["karjet"]],
+                    "karjet": [[*latlon(k["e"], k["n"]), str(k.get("nimi") or ""), k.get("laji"), k["e"], k["n"]]
+                               for k in v["karjet"]],
                     "piirto": [list(latlon(e, n)) for e, n in sl.viivan_pisteet(v)]}
                    for v in tulos["viivat"]],
-        "pisteet": [[*latlon(e, n), str(nimi), str(koodi or "")] for nimi, koodi, e, n, _ in kohteet],
+        "pisteet": [[*latlon(e, n), str(nimi), str(koodi or ""), e, n] for nimi, koodi, e, n, _ in kohteet],
         "valittu": valittu,
+        "kumottavia": kumottavia,
         "taustat": _taustat(api_key, helsinki),
     }
     tulos_k = _komponentti()(key=key, data=data, height="content", on_muokkaus_change=lambda: None)
@@ -537,9 +665,20 @@ def suorakulmio(kulmat, nimi, pohja):
             "kulma": r["kulma"], "lavistajaero": r["lavistajaero"]}
 
 
-def muokkaukseksi(tapahtuma, tulos, kohteet, uuden_nimi="Uusi viiva", suorakulmion_nimi="Suorakulmio 1"):
+def muokkaukseksi(tapahtuma, tulos, kohteet, uuden_nimi="Uusi viiva", suorakulmion_nimi="Suorakulmio 1",
+                  pisteen_nimi="L1"):
     """Kartan tapahtuma seinalinja.sovella_muokkaukset()-muokkaukseksi EPSG:3879:ssä. uuden_nimi = piirretyn
-    uuden viivan nimi, suorakulmion_nimi = kartalta kolmen kulman tuplaklikkauksella täydennetyn nimi."""
+    uuden viivan nimi, suorakulmion_nimi = kartalta kolmesta kulmasta täydennetyn nimi, pisteen_nimi =
+    Sivumitta-työkalun (suorakulmainen mittaus) laskeman irrallisen pisteen nimi. ("kumoa"-tapahtuman
+    käsittelee kutsuja.)"""
+    if tapahtuma["tyyppi"] == "sivumitta":
+        a = _koordinaatit(tapahtuma["a"], tulos, kohteet)
+        b = _koordinaatit(tapahtuma["b"], tulos, kohteet)
+        a_mitta, b_mitta = float(tapahtuma["a_mitta"]), float(tapahtuma["b_mitta"])
+        e, n = sl.suorakulmainen_piste((a["e"], a["n"]), (b["e"], b["n"]), a_mitta, b_mitta)
+        return {"tyyppi": "piste", "nimi": pisteen_nimi, "e": round(e, 3), "n": round(n, 3),
+                "a": tapahtuma.get("a_nimi") or a["nimi"], "b": tapahtuma.get("b_nimi") or b["nimi"],
+                "a_mitta": a_mitta, "b_mitta": b_mitta}
     if tapahtuma["tyyppi"] == "suorakulmio":
         kulmat = [_koordinaatit(s, tulos, kohteet) for s in tapahtuma["kulmat"]]
         for k, s in zip(kulmat, tapahtuma["kulmat"]):

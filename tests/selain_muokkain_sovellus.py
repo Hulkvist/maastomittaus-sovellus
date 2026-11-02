@@ -21,7 +21,8 @@ TULOS = {"viivat": [{"nimi": "Viiva 1", "suljettu": False,
 if __name__ == "__main__":         # streamlit run; testi tuo vain vakiot
     st.set_page_config(layout="wide")             # kuten app.py
     tapahtumat = st.session_state.setdefault("tapahtumat", [])
-    t = slm.nayta(TULOS, PISTEET)
+    t = slm.nayta(TULOS, PISTEET, kumottavia=len(tapahtumat))
     if t:
         tapahtumat.append(t)
+        st.rerun()                                # kuten app.py: kartta saa uuden tilan (Kumoa-nappi)
     st.code(json.dumps(tapahtumat, ensure_ascii=False), language=None)
