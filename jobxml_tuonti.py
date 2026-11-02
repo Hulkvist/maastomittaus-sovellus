@@ -27,7 +27,7 @@ TYOJAKSO_KYNNYS_H = 2
 SUURI_SE_VAROITUSRAJA_M = 0.02
 PIENI_TYOJAKSO_VAROITUSRAJA_S = 120
 REAALILUOKAT = {'Normal', 'BackSight', 'Stakeout', 'Construction'}
-KOJEASENTO_LOOKBACK = 15  # kuinka monta tietuetta taaksepäin etsitään raakahavaintoja
+KOJEASENTO_LOOKBACK = 15  # Averaged: kuinka monta tietuetta taaksepäin etsitään Face-kentättömiä toistomittauksia
 
 
 # ---------------------------------------------------------------------------
@@ -197,45 +197,63 @@ def _merkitse_kojeasento_suppressoinnit(recs):
       omassa lohkossa Method on aina "Coordinates" (ei "GpsStaticObservation"),
       jolloin pdop/hdop/satelliittitiedot katoaisivat kokonaan, jos piste
       mitattiin kahdesti RTK:lla ja Trimble laski niistä keskiarvon.
+
+    Lähteet etsitään taaksepäin samannimisistä tietueista:
+    - Face1/Face2-havainto kuuluu vain saman aseman (StationID) MTA:lle, olipa se
+      kuinka kaukana tahansa (kierrokset, monta liitospistettä). Toiselta asemalta
+      mitattu samanniminen piste tai RTK:lla aiemmin mitattu liitospiste ei sulaudu
+      MTA:han (RTK-mittaus jää "alkuperäiseksi RTK-mittaukseksi").
+    - Averaged-tietueelle myös Face-kentättömät toistomittaukset (esim. kahdesti
+      RTK:lla) KOJEASENTO_LOOKBACK-tietueen sisältä.
+    - Haku pysähtyy saman nimen edelliseen MTA/Averaged-tulokseen (aiempi sarja).
+    Luokka peritään lähimmästä lähteestä.
     """
     n = len(recs)
+    kentat = [{k: _poimi(k, block) for k in ('Name', 'Classification', 'Face', 'StationID', 'Method')}
+              for _, _, block in recs]
     suppress = set()
     final_class = {}
     kojeasento_idx = set()
     gps_laatu_map = {}
 
-    for i, (_, _, block) in enumerate(recs):
-        classification = _poimi('Classification', block)
-        if classification not in ('MTA', 'Averaged'):
+    for i, k in enumerate(kentat):
+        if k['Classification'] not in ('MTA', 'Averaged'):
             continue
-        name = _poimi('Name', block)
-
-        if classification == 'MTA' and i + 1 < n:
-            next_name = _poimi('Name', recs[i + 1][2])
-            next_class = _poimi('Classification', recs[i + 1][2])
-            if next_name == name and next_class == 'Averaged':
-                suppress.add(i)
-                continue
+        name = k['Name']
+        if (k['Classification'] == 'MTA' and i + 1 < n and kentat[i + 1]['Name'] == name
+                and kentat[i + 1]['Classification'] == 'Averaged'):
+            suppress.add(i)       # välivaihe: Averaged (seuraava) on lopputulos
+            continue
+        # Averaged heti MTA:n perässä: Face-havainnot kuuluvat MTA:n asemalle
+        if k['Classification'] == 'MTA':
+            asema = k['StationID']
+        elif i > 0 and kentat[i - 1]['Name'] == name and kentat[i - 1]['Classification'] == 'MTA':
+            asema = kentat[i - 1]['StationID']
+        else:
+            asema = None
 
         real_class = None
         faces_seen = set()
         gps_laatu_lista = []
-        j = i - 1
-        askeleet = 0
-        while j >= 0 and askeleet < KOJEASENTO_LOOKBACK:
-            j_name = _poimi('Name', recs[j][2])
-            j_class = _poimi('Classification', recs[j][2])
-            if j_name == name and j_class in REAALILUOKAT:
-                suppress.add(j)
-                real_class = j_class
-                face = _poimi('Face', recs[j][2])
-                if face:
-                    faces_seen.add(face)
-                j_method = _poimi('Method', recs[j][2])
-                if j_method == 'GpsStaticObservation':
-                    gps_laatu_lista.append(_pdop_tiedot(recs[j][2]))
-            askeleet += 1
-            j -= 1
+        for j in range(i - 1, -1, -1):
+            kj = kentat[j]
+            if kj['Name'] != name:
+                continue
+            if j in final_class:
+                break             # saman nimen edellinen sarja
+            if kj['Classification'] not in REAALILUOKAT:
+                continue
+            if kj['Face']:
+                if asema is None or kj['StationID'] != asema:
+                    continue
+            elif k['Classification'] != 'Averaged' or i - j > KOJEASENTO_LOOKBACK:
+                continue
+            suppress.add(j)
+            real_class = real_class or kj['Classification']
+            if kj['Face']:
+                faces_seen.add(kj['Face'])
+            if kj['Method'] == 'GpsStaticObservation':
+                gps_laatu_lista.append(_pdop_tiedot(recs[j][2]))
 
         final_class[i] = real_class or 'Normal'
         if {'Face1', 'Face2'} <= faces_seen:
