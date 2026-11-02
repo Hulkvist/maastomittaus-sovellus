@@ -98,3 +98,25 @@ def test_suorakulmio_kolmesta_tuplaklikkauksesta():
     with pytest.raises(ValueError):
         slm.muokkaukseksi({"tyyppi": "suorakulmio", "kulmat": [{"piste": 0}, {"piste": 1}, {"lat": lat, "lon": lon}]},
                           tulos, kohteet)
+
+
+def test_sivumitta_kartalta_irrallinen_piste():
+    """Sivumitta-työkalu: A (piste 1) -> B (piste 2, itään), a 4,25 m, b 1,5 m oikealle (etelään) =
+    irrallinen laskettu piste, viivat ennallaan. A tai B voi olla myös viivan kärki."""
+    tulos, pisteet = _tulos()
+    kohteet = slm.napsahduspisteet(pisteet)
+    m = slm.muokkaukseksi({"tyyppi": "sivumitta", "a": {"piste": 0},
+                           "b": {"piste": 1}, "a_nimi": "1", "b_nimi": "2", "a_mitta": 4.25, "b_mitta": 1.5},
+                          tulos, kohteet, pisteen_nimi="L3")
+    assert m == {"tyyppi": "piste", "nimi": "L3", "e": E0 + 4.25, "n": N0 - 1.5, "a": "1", "b": "2",
+                 "a_mitta": 4.25, "b_mitta": 1.5}
+    uusi = sl.sovella_muokkaukset(tulos, [m])
+    assert uusi["viivat"] == tulos["viivat"]
+    assert uusi["lasketut_pisteet"][-1] == {"nimi": "L3", "e": E0 + 4.25, "n": N0 - 1.5}
+    assert "a 4.25 m, b 1.5 m" in slm.kuvaus(m)
+    # B viivan kärkenä (kärki 2 = piste 4, pohjoiseen): + oikealle = itään
+    m = slm.muokkaukseksi({"tyyppi": "sivumitta", "a": {"piste": 0},
+                           "b": {"kohde_viiva": tulos["viivat"][0]["nimi"], "kohde_karki": 1},
+                           "a_mitta": 2.0, "b_mitta": 1.0}, tulos, kohteet)
+    k = tulos["viivat"][0]["karjet"][1]
+    assert (k["e"], k["n"]) == (E0, N0 + 8) and (m["e"], m["n"], m["nimi"]) == (E0 + 1.0, N0 + 2.0, "L1")

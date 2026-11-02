@@ -606,19 +606,27 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     kohteet = slm.napsahduspisteet(jx.pisteet_tallennettavaksi(pisteet), sl_tulos)
     st.caption("Valitse työkalu kartan yläpuolelta (toimii hiirellä, kynällä ja sormella). "
                "**Siirrä**: raahaa kärkeä; se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen, kun se on "
-               "lähellä (kärki muuttuu vihreäksi ja kohteen nimi näkyy). **Lisää kärki**: napauta viivaa. "
-               "**Poista**: napauta kärkeä tai janaa ja vahvista. **Suorakulmio**: napauta kolmea pistettä tai "
-               "kärkeä = neljäs kulma lasketaan. **Uusi viiva**, **Jatka** ja **Yhdistä**. Hiirellä myös: viivan "
-               "klikkaus = uusi kärki, oikea klikkaus = poista, tuplaklikkaus = suorakulmion kulma, Esc = peruuta. "
-               "Punainen kärki = laskettu kulma, oranssi = käsin siirretty, punainen piste = suorakulmaisella "
-               "mittauksella laskettu piste. Taustakartan voi vaihtaa oikeasta yläkulmasta.")
-    tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu)
+               "lähellä (kärki muuttuu vihreäksi ja kohteen nimi näkyy). Napautus näyttää janan pituuden ja kärjen "
+               "kulman. **Lisää kärki**: napauta viivaa. **Poista**: napauta kärkeä tai janaa ja vahvista. "
+               "**Suorakulmio**: napauta kolmea pistettä tai kärkeä = neljäs kulma lasketaan. **Uusi viiva**, "
+               "**Jatka** ja **Yhdistä**. **Mittaa**: kahden pisteen etäisyys. **Sivumitta**: suorakulmainen "
+               "mittaus kartalla (A, B, a- ja b-mitta) = irrallinen piste. **Kumoa** oikealla. Hiirellä myös: "
+               "viivan klikkaus = uusi kärki, oikea klikkaus = poista, tuplaklikkaus = suorakulmion kulma, Esc = "
+               "peruuta. Punainen kärki = laskettu kulma, oranssi = käsin siirretty, punainen piste = "
+               "suorakulmaisella mittauksella laskettu piste. Taustakartan voi vaihtaa oikeasta yläkulmasta.")
+    tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu,
+                          kumottavia=len(tila["muokkaukset"]))
+    if tapahtuma and tapahtuma.get("tyyppi") == "kumoa":
+        if tila["muokkaukset"]:
+            tila["muokkaukset"].pop()
+        st.rerun()
     if tapahtuma:
         try:
             uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "uusi_viiva" and m["nimi"].startswith("Uusi"))
             suorakulmioita = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "suorakulmio")
             tila["muokkaukset"].append(slm.muokkaukseksi(tapahtuma, sl_tulos, kohteet, f"Uusi viiva {uusia + 1}",
-                                                         f"Suorakulmio {suorakulmioita + 1}"))
+                                                         f"Suorakulmio {suorakulmioita + 1}",
+                                                         f"L{len(sl_tulos.get('lasketut_pisteet', [])) + 1}"))
         except ValueError as e:
             st.warning(f"Suorakulmiota ei tehty: {e}" if tapahtuma.get("tyyppi") == "suorakulmio" else str(e))
         except Exception as e:

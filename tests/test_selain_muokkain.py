@@ -197,3 +197,69 @@ def test_hiiren_pikatoiminnot_toimivat(sivu):
     sivu.mouse.click(x, y)
     t = tapahtumat(sivu, 2)[-1]
     assert t["tyyppi"] == "lisaa" and t["jalkeen"] == 0
+
+
+def test_siirra_napautus_nayttaa_pituuden_ja_kulman(sivu):
+    kyna = Kyna(sivu)
+    x, y = kohta(sivu, 10, 0)
+    kyna.napauta(x, y + 5)
+    assert "pituus 20,000 m" in sivu.locator(".slm-ohje").inner_text()
+    x, y = kohta(sivu, 20, 0)
+    kyna.napauta(x, y)
+    assert "kärki 2 (piste 2), kulma 90,0°" in sivu.locator(".slm-ohje").inner_text()
+
+
+def test_mittaa_kahden_pisteen_etaisyys(sivu):
+    kyna = Kyna(sivu)
+    nappi(sivu, kyna, "mittaa")
+    for de, dn in [(0, 0), (23, 4)]:
+        x, y = kohta(sivu, de, dn)
+        kyna.napauta(x + 4, y - 4)
+    teksti = sivu.locator(".slm-ohje").inner_text()
+    assert "23,345 m (ΔE 23,000, ΔN 4,000)" in teksti and "P9" in teksti
+    assert tapahtumat(sivu, 0, aikaraja=0) == []
+
+
+def test_sivumitta_kartalla(sivu):
+    kyna = Kyna(sivu)
+    nappi(sivu, kyna, "sivumitta")
+    assert not sivu.locator(".slm-sivu").is_visible()
+    for de, dn in [(0, 0), (20, 0)]:
+        x, y = kohta(sivu, de, dn)
+        kyna.napauta(x, y)
+    sivu.locator('[data-i="a"]').fill("5")
+    sivu.locator('[data-i="b"]').fill("2,5")            # pilkku käy desimaalierottimena
+    assert "Uusi piste: E 25497135.000 N 6677367.500" in sivu.locator(".slm-ohje").inner_text()
+    nappi(sivu, kyna, "lisaapiste")
+    t = tapahtumat(sivu, 1)[-1]
+    assert t == {"tyyppi": "sivumitta", "a": {"piste": 0}, "b": {"piste": 1}, "a_nimi": "1", "b_nimi": "2",
+                 "a_mitta": 5, "b_mitta": 2.5}
+
+
+def test_kumoa_nappi(sivu):
+    kyna = Kyna(sivu)
+    kumoa = sivu.locator('[data-a="kumoa"]')
+    assert kumoa.is_disabled()                          # ei muokkauksia
+    x, y = kohta(sivu, 20, 10)
+    sivu.mouse.click(x, y, button="right")
+    tapahtumat(sivu, 1)
+    sivu.wait_for_timeout(500)
+    assert kumoa.is_enabled()
+    nappi(sivu, kyna, "kumoa")
+    assert tapahtumat(sivu, 2)[-1] == {"tyyppi": "kumoa"}
+
+
+def test_kartta_ei_hypi_tyokalua_vaihdettaessa(sivu):
+    """Ohje ja toimintorivi vievät aina saman tilan: kartta pysyy paikallaan kynän alla."""
+    kyna = Kyna(sivu)
+    def ylareuna():
+        return sivu.locator(".slm-kartta").bounding_box()["y"]
+
+    alku = ylareuna()
+    for avain in ("lisaa", "poista", "suorakulmio", "piirra", "jatka", "yhdista", "mittaa", "sivumitta"):
+        nappi(sivu, kyna, avain)
+        assert ylareuna() == alku, avain
+    for de, dn in [(0, 0), (20, 0)]:                    # Sivumitan a- ja b-kentät näkyviin
+        x, y = kohta(sivu, de, dn)
+        kyna.napauta(x, y)
+    assert sivu.locator(".slm-sivu").is_visible() and ylareuna() == alku
