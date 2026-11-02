@@ -134,7 +134,14 @@ def _tiedostona(kirjoita, nimi):
             return f.read()
 
 
-st.image("kuvat/koirat_kuplat.jpg", width="stretch")  # alkuperäinen ilman kuplia: kuvat/koirat.jpg
+# Otsakekuva näytön korkeuden mukaan: enintään neljännes näytöstä, rajattuna keskeltä (koirat ja kuplat
+# jäävät, reunojen tyhjä tausta pois). Isolla näytöllä kokonaan, matalalla (esim. maastotabletti 1280x720)
+# kapeana kaistana, jotta välilehdet näkyvät heti.
+st.html("""<style>
+.st-key-otsakekuva img { max-height: 25vh; object-fit: cover; object-position: center 25%; }
+</style>""")
+with st.container(key="otsakekuva"):
+    st.image("kuvat/koirat_kuplat.jpg", width="stretch")  # alkuperäinen ilman kuplia: kuvat/koirat.jpg
 st.title(OTSIKKO)
 st.caption(KUVAUS)
 
