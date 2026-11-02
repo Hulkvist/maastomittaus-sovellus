@@ -379,7 +379,7 @@ def _hakutulokset():
     koordinaatisto, kohde_epsg, desimaalit = haku["koordinaatisto"], haku["kohde_epsg"], haku["desimaalit"]
 
     st.subheader(f"Kartta ({tunnus})")
-    st.caption("Zoomaa hiirellä tai +/- napeista. Taustakartan ja tasot voi vaihtaa oikeasta yläkulmasta.")
+    st.caption("Zoomaa hiirellä, kahdella sormella tai +/- napeista. Taustakartan ja tasot voi vaihtaa oikeasta yläkulmasta.")
     try:
         hakukartta = hk.luo_kiinteisto_interaktiivinen_kartta(
             coords, tulokset, rajamerkit, rajaviivat if nayta_rajat else None,
@@ -583,13 +583,14 @@ def _seinalinjan_valmistelu(kaikki_pisteet, raaka_bytes):
 def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     """Muokkauskartta (seinalinjan_muokkain), Kumoa/Palauta ja suorakulmainen mittaus."""
     kohteet = slm.napsahduspisteet(jx.pisteet_tallennettavaksi(pisteet), sl_tulos)
-    st.caption("Raahaa kärkeä hiirellä: se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen, kun se on "
-               "lähellä (kärki muuttuu vihreäksi). Klikkaa viivaa = uusi kärki, oikea klikkaus viivaan = poista "
-               "jana, oikea klikkaus kärkeen = poista kärki. Tuplaklikkaa kolmea pistettä tai kärkeä peräkkäin = "
-               "täydennä suorakulmioksi (valitut näkyvät oransseina numeroina, saman tuplaklikkaus = pois, Esc = "
-               "tyhjennä). Punainen kärki = laskettu kulma, "
-               "oranssi = käsin siirretty, punainen piste = suorakulmaisella mittauksella laskettu piste. Uuden viivan saa kartan vasemman yläkulman napista ✏ Uusi viiva. "
-               "Taustakartan voi vaihtaa oikeasta yläkulmasta.")
+    st.caption("Valitse työkalu kartan yläpuolelta (toimii hiirellä, kynällä ja sormella). "
+               "**Siirrä**: raahaa kärkeä; se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen, kun se on "
+               "lähellä (kärki muuttuu vihreäksi ja kohteen nimi näkyy). **Lisää kärki**: napauta viivaa. "
+               "**Poista**: napauta kärkeä tai janaa ja vahvista. **Suorakulmio**: napauta kolmea pistettä tai "
+               "kärkeä = neljäs kulma lasketaan. **Uusi viiva**, **Jatka** ja **Yhdistä**. Hiirellä myös: viivan "
+               "klikkaus = uusi kärki, oikea klikkaus = poista, tuplaklikkaus = suorakulmion kulma, Esc = peruuta. "
+               "Punainen kärki = laskettu kulma, oranssi = käsin siirretty, punainen piste = suorakulmaisella "
+               "mittauksella laskettu piste. Taustakartan voi vaihtaa oikeasta yläkulmasta.")
     tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu)
     if tapahtuma:
         try:
@@ -641,7 +642,7 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
     with st.container(border=True):
         st.markdown("**Poista jana**")
         st.caption("Suljettu viiva aukeaa poistetun janan kohdalta, avoin viiva katkeaa kahdeksi viivaksi. "
-                   "Kartalla saman saa oikealla klikkauksella viivaan.")
+                   "Kartalla saman saa Poista-työkalulla.")
         sarakkeet = st.columns([2, 3, 1])
         viivanimet = [v["nimi"] for v in sl_tulos["viivat"]]
         jv = sarakkeet[0].selectbox("Viiva", viivanimet,
@@ -710,8 +711,8 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
 
     with st.container(border=True):
         st.markdown("**Täydennä suorakulmioksi**")
-        st.caption("Kolme mitattua talon kulmaa → neljäs kulma lasketaan (kartalla: tuplaklikkaa kolmea pistettä "
-                   "peräkkäin). Suora kulma päätellään pisteistä; sen "
+        st.caption("Kolme mitattua talon kulmaa → neljäs kulma lasketaan (kartalla: Suorakulmio-työkalu ja "
+                   "kolme pistettä). Suora kulma päätellään pisteistä; sen "
                    f"pitää olla 90 ± {sl.SUORAKULMIO_MAX_KULMA:g}°. Jos kolme kulmaa ovat avoimen viivan kaikki "
                    "kärjet, viiva suljetaan; muuten syntyy uusi suljettu viiva.")
         sarakkeet = st.columns(3)
@@ -786,7 +787,7 @@ def _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi):
                                                                   viiva=valittu, lidar=lidar,
                                                                   poikkeamat_lidar=poikkeamat_lidar)
             if sl_kartta is not None:
-                st.caption("Zoomaa hiirellä tai +/- napeista. Pisteestä saa koordinaatit klikkaamalla.")
+                st.caption("Zoomaa hiirellä, kahdella sormella tai +/- napeista. Pisteestä saa koordinaatit klikkaamalla.")
                 # returned_objects=[] -> zoomaus ei aja sovellusta uudelleen; avain rajauksen
                 # mukaan, jotta kartta rajataan uudelleen valinnan vaihtuessa
                 st_folium(sl_kartta, height=650, use_container_width=True, returned_objects=[],
@@ -876,7 +877,10 @@ def _mittauksen_yhteenveto(raportti):
     sarakkeet[1].metric("Hylättyjä", raportti["hylatyt_maara"], help="Lasketut pisteet, joita ei tallenneta.")
     sarakkeet[2].metric("Asemia", len(raportti["asemapisteet"]))
     sarakkeet[3].metric("Huonoin asema", huonoin or "-")
-    sarakkeet[4].metric("Työaika", jx._muotoile_kesto(tyoaika) if tyoaika else "-")
+    # minuutteina, jotta mahtuu kapeaan sarakkeeseen (tarkka aika osiossa Aika työmaalla)
+    minuutit = round(tyoaika / 60) if tyoaika else 0
+    sarakkeet[4].metric("Työaika", "-" if not tyoaika else f"{minuutit // 60} h {minuutit % 60} min"
+                        if minuutit >= 60 else f"{minuutit} min", help=jx._muotoile_kesto(tyoaika) if tyoaika else None)
     sarakkeet[5].metric("2x-säännön ylityksiä", len(raportti["varoitukset_2x"]))
 
 
@@ -1122,7 +1126,7 @@ def _mittausten_tuonti():
             kartta = hk.luo_jobxml_interaktiivinen_kartta(kaikki_pisteet, seina["tulos"] if seina else None,
                                                           api_key=hk.MML_API_KEY)
             if kartta is not None:
-                st.caption("Zoomaa hiirellä tai +/- napeista. Taustakartan ja tasot voi vaihtaa oikeasta yläkulmasta.")
+                st.caption("Zoomaa hiirellä, kahdella sormella tai +/- napeista. Taustakartan ja tasot voi vaihtaa oikeasta yläkulmasta.")
                 # returned_objects=[] -> zoomaus ei aja sovellusta uudelleen
                 st_folium(kartta, height=600, use_container_width=True, returned_objects=[],
                           key="jobxml_kokonaiskartta")

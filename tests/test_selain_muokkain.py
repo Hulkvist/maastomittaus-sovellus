@@ -1,0 +1,199 @@
+"""Seinälinjan muokkauskartan selaintesti (Playwright + Chrome): kynällä (maastotabletti, esim. Trimble TSC7)
+ja hiirellä. Kynä emuloidaan Chromen DevTools-protokollalla (Input.dispatchMouseEvent, pointerType "pen").
+
+Ajetaan vain, kun Playwright ja Chrome ovat asennettuina (ei CI:ssä):
+    pip install playwright && pytest tests/test_selain_muokkain.py
+Kartta lataa Leafletin CDN:stä, joten testi tarvitsee verkkoyhteyden."""
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+
+import pytest
+
+sync_api = pytest.importorskip("playwright.sync_api")
+
+HAKEMISTO = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HAKEMISTO)
+sys.path.insert(0, os.path.dirname(HAKEMISTO))
+import selain_muokkain_sovellus as sov  # (vain vakiot; Streamlit-koodi ei aja ilman ajonaikaa)
+
+import hae_kiintopisteet as hk
+
+pytestmark = pytest.mark.selain
+
+
+@pytest.fixture(scope="module")
+def osoite():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        portti = s.getsockname()[1]
+    prosessi = subprocess.Popen(
+        [sys.executable, "-m", "streamlit", "run", os.path.join(HAKEMISTO, "selain_muokkain_sovellus.py"),
+         "--server.headless", "true", "--server.port", str(portti), "--browser.gatherUsageStats", "false"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    url = f"http://127.0.0.1:{portti}"
+    try:
+        for _ in range(60):
+            try:
+                urllib.request.urlopen(url + "/_stcore/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.5)
+        else:
+            pytest.skip("Streamlit ei käynnistynyt")
+        yield url
+    finally:
+        prosessi.terminate()
+        prosessi.wait(10)
+
+
+@pytest.fixture
+def sivu(osoite):
+    with sync_api.sync_playwright() as p:
+        try:
+            selain = p.chromium.launch(channel="chrome")
+        except sync_api.Error as e:
+            pytest.skip(f"Chrome puuttuu: {e}")
+        sivu = selain.new_page(viewport={"width": 1280, "height": 720}, has_touch=True)
+        sivu.goto(osoite)
+        sivu.wait_for_selector(".slm-kahva", timeout=30000)
+        sivu.wait_for_timeout(500)
+        yield sivu
+        selain.close()
+
+
+class Kyna:
+    """Kynän napautus ja raahaus sivun koordinaateissa (CDP)."""
+
+    def __init__(self, sivu):
+        self.cdp = sivu.context.new_cdp_session(sivu)
+        self.sivu = sivu
+
+    def _tapahtuma(self, tyyppi, x, y, **lisa):
+        self.cdp.send("Input.dispatchMouseEvent", {"type": tyyppi, "x": x, "y": y, "pointerType": "pen",
+                                                   "button": "left", **lisa})
+
+    def napauta(self, x, y):
+        self._tapahtuma("mouseMoved", x, y, button="none")
+        self._tapahtuma("mousePressed", x, y, buttons=1, clickCount=1)
+        self._tapahtuma("mouseReleased", x, y, buttons=0, clickCount=1)
+        self.sivu.wait_for_timeout(250)
+
+    def raahaa(self, x0, y0, x1, y1, askelia=12):
+        self._tapahtuma("mouseMoved", x0, y0, button="none")
+        self._tapahtuma("mousePressed", x0, y0, buttons=1, clickCount=1)
+        for i in range(1, askelia + 1):
+            self._tapahtuma("mouseMoved", x0 + (x1 - x0) * i / askelia, y0 + (y1 - y0) * i / askelia, buttons=1)
+            self.sivu.wait_for_timeout(20)
+        self._tapahtuma("mouseReleased", x1, y1, buttons=0, clickCount=1)
+        self.sivu.wait_for_timeout(250)
+
+
+def kohta(sivu, de, dn):
+    """Paikallisen pisteen (m talon kulmasta) sijainti sivulla pikseleinä."""
+    lat, lon = hk._latlon_muunnin()(sov.E0 + de, sov.N0 + dn)
+    return sivu.evaluate("""([lat, lon]) => {
+        const el = document.querySelector(".slm-kartta");
+        const p = el.parentElement.__slm.kartta.latLngToContainerPoint([lat, lon]);
+        const r = el.getBoundingClientRect();
+        return [r.left + p.x, r.top + p.y];
+    }""", [lat, lon])
+
+
+def tapahtumat(sivu, maara, aikaraja=15):
+    """Odottaa, että tapahtumia on vähintään maara, ja palauttaa ne."""
+    loppu = time.time() + aikaraja
+    while True:
+        teksti = sivu.locator('[data-testid="stCode"]').inner_text()
+        lista = json.loads(teksti)
+        if len(lista) >= maara or time.time() > loppu:
+            return lista
+        sivu.wait_for_timeout(200)
+
+
+def nappi(sivu, kyna, avain):
+    laatikko = sivu.locator(f'.slm-tyokalut [data-t="{avain}"], .slm-tyokalut [data-a="{avain}"]').bounding_box()
+    assert laatikko["height"] >= 44 and laatikko["width"] >= 44    # kynällä ja sormella osuttava
+    kyna.napauta(laatikko["x"] + laatikko["width"] / 2, laatikko["y"] + laatikko["height"] / 2)
+
+
+def test_kynalla_raahaus_napsahtaa_pisteeseen(sivu):
+    kyna = Kyna(sivu)
+    x0, y0 = kohta(sivu, 20, 0)
+    x1, y1 = kohta(sivu, 23, 4)
+    kyna.raahaa(x0, y0, x1 + 15, y1 - 10)      # 18 px pisteen ohi: kynän napsahdussäde riittää
+    t = tapahtumat(sivu, 1)
+    assert t[-1] == {"tyyppi": "siirra", "viiva": "Viiva 1", "karki": 1, "piste": 4}
+
+
+def test_kynan_napautus_viivaan_ei_muokkaa(sivu):
+    kyna = Kyna(sivu)
+    x, y = kohta(sivu, 10, 0)
+    kyna.napauta(x, y + 6)
+    sivu.wait_for_timeout(800)
+    assert tapahtumat(sivu, 0, aikaraja=0) == []
+    assert "Viiva 1: jana 1" in sivu.locator(".slm-ohje").inner_text()
+
+
+def test_lisaa_karki(sivu):
+    kyna = Kyna(sivu)
+    nappi(sivu, kyna, "lisaa")
+    x, y = kohta(sivu, 10, 0)
+    kyna.napauta(x, y + 8)                        # ohi viivasta 8 px
+    t = tapahtumat(sivu, 1)
+    assert t[-1]["tyyppi"] == "lisaa" and t[-1]["viiva"] == "Viiva 1" and t[-1]["jalkeen"] == 0
+    assert "lat" in t[-1]
+
+
+def test_poista_vaatii_vahvistuksen(sivu):
+    kyna = Kyna(sivu)
+    nappi(sivu, kyna, "poista")
+    x, y = kohta(sivu, 20, 10)
+    kyna.napauta(x + 12, y + 8)                   # kärjen ohi 14 px
+    sivu.wait_for_timeout(800)
+    assert tapahtumat(sivu, 0, aikaraja=0) == []
+    assert "kärki 3" in sivu.locator(".slm-ohje").inner_text()
+    kyna.napauta(x, y)
+    assert tapahtumat(sivu, 1)[-1] == {"tyyppi": "poista", "viiva": "Viiva 1", "karki": 2}
+    # jana: valinta ja vahvistus napista (avoimen viivan yläsivu kärjestä 3 kärkeen 4)
+    x, y = kohta(sivu, 10, 10)
+    kyna.napauta(x, y - 6)
+    nappi(sivu, kyna, "vahvista")
+    assert tapahtumat(sivu, 2)[-1] == {"tyyppi": "poista_jana", "viiva": "Viiva 1", "jana": 2}
+
+
+def test_suorakulmio_kolmella_napautuksella(sivu):
+    kyna = Kyna(sivu)
+    nappi(sivu, kyna, "suorakulmio")
+    for de, dn in [(0, 0), (20, 0), (23, 4)]:
+        x, y = kohta(sivu, de, dn)
+        kyna.napauta(x + 5, y - 5)
+    t = tapahtumat(sivu, 1)[-1]
+    assert t["tyyppi"] == "suorakulmio" and len(t["kulmat"]) == 3
+    assert {"piste": 4} in t["kulmat"]
+
+
+def test_uusi_viiva_valmis_napista(sivu):
+    kyna = Kyna(sivu)
+    nappi(sivu, kyna, "piirra")
+    for de, dn in [(0, 0), (23, 4), (10, 5)]:
+        x, y = kohta(sivu, de, dn)
+        kyna.napauta(x, y)
+    nappi(sivu, kyna, "valmis")
+    t = tapahtumat(sivu, 1)[-1]
+    assert t["tyyppi"] == "uusi_viiva" and not t["suljettu"] and len(t["karjet"]) == 3
+    assert t["karjet"][1] == {"piste": 4} and "lat" in t["karjet"][2]
+
+
+def test_hiiren_pikatoiminnot_toimivat(sivu):
+    x, y = kohta(sivu, 20, 10)
+    sivu.mouse.click(x, y, button="right")
+    assert tapahtumat(sivu, 1)[-1] == {"tyyppi": "poista", "viiva": "Viiva 1", "karki": 2}
+    x, y = kohta(sivu, 10, 0)
+    sivu.mouse.click(x, y)
+    t = tapahtumat(sivu, 2)[-1]
+    assert t["tyyppi"] == "lisaa" and t["jalkeen"] == 0

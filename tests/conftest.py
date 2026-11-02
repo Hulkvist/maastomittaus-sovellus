@@ -11,6 +11,7 @@ OIKEAT_AINEISTOT = os.path.isdir(JXL_DATA)
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "oikeat_aineistot: tarvitsee tests/data/jobxml/-mittausaineistot")
+    config.addinivalue_line("markers", "selain: selaintesti (Playwright + Chrome, ohitetaan ilman niitä)")
 
 
 def pytest_runtest_setup(item):
