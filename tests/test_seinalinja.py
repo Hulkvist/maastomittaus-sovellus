@@ -229,6 +229,22 @@ def test_dxf_vienti(tmp_path):
     assert len(msp.query('TEXT[layer=="MITATUT_PISTEET"]')) == 0
 
 
+def test_dxf_lasketut_pisteet(tmp_path):
+    """Suorakulmaisella mittauksella lasketut irralliset pisteet omalle tasolleen tekstin kanssa."""
+    ezdxf = pytest.importorskip("ezdxf")
+    tulos = sl.muodosta_seinalinjat([piste("1", "8", 0, 0), piste("2", "5", 10, 0), piste("3", "5", 10, 6)])
+    tulos = sl.sovella_muokkaukset(tulos, [{"tyyppi": "piste", "nimi": "L1", "e": E0 + 2.5, "n": N0 - 1.5,
+                                            "a": "1", "b": "2", "a_mitta": 2.5, "b_mitta": 1.5}])
+    msp = ezdxf.readfile(sl.kirjoita_dxf(tulos, str(tmp_path / "lasketut.dxf"))).modelspace()
+    [p] = msp.query('POINT[layer=="LASKETUT_PISTEET"]')
+    assert (p.dxf.location.x, p.dxf.location.y) == (E0 + 2.5, N0 - 1.5)
+    assert "L1 (laskettu)" in [t.dxf.text for t in msp.query('TEXT[layer=="PISTETEKSTIT"]')]
+    # pelkät lasketut pisteet ilman viivoja
+    msp = ezdxf.readfile(sl.kirjoita_dxf({"viivat": [], "pisteet": [], "lasketut_pisteet": tulos["lasketut_pisteet"]},
+                                         str(tmp_path / "vain.dxf"))).modelspace()
+    assert len(msp.query('POINT[layer=="LASKETUT_PISTEET"]')) == 1
+
+
 def test_esikatselukuva(tmp_path):
     pytest.importorskip("matplotlib")
     pisteet = [piste("1", "8", 0, 0), piste("2", "5", 10, 0), piste("3", "5", 10, 6)]
@@ -976,7 +992,8 @@ def test_sovella_muokkaukset_laskettu_piste():
     tulos = _viivat(A=[(0, 0), (10, 0)])
     m = {"tyyppi": "piste", "nimi": "L1", "e": E0 + 5, "n": N0 + 2, "a": "x", "b": "y", "a_mitta": 5, "b_mitta": -2}
     uusi = sl.sovella_muokkaukset(tulos, [m])
-    assert uusi["lasketut_pisteet"] == [{"nimi": "L1", "e": E0 + 5, "n": N0 + 2}]
+    assert uusi["lasketut_pisteet"] == [{"nimi": "L1", "e": E0 + 5, "n": N0 + 2, "a": "x", "b": "y",
+                                         "a_mitta": 5, "b_mitta": -2}]
     assert karjet_xy(uusi["viivat"][0]) == [(0, 0), (10, 0)] and not uusi["varoitukset"]
     # kärki raahattu laskettuun pisteeseen: laji laskettu
     siirto = {"tyyppi": "siirra", "viiva": "A", "karki": 1, "e": E0 + 5, "n": N0 + 2, "z": None, "nimi": "L1",

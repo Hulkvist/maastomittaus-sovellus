@@ -16,16 +16,16 @@ GNSS_LAATU = ("<QualityControl1><PDOP>1.4</PDOP><HDOP>0.8</HDOP><VDOP>1.1</VDOP>
 
 class Tyo:
     def __init__(self):
-        self.osat, self.n = [], 0x100
+        self.osat, self.n, self.lopulliset = [], 0x100, []
 
     def _id(self):
         self.n += 1
         return f"{self.n:08x}", f"2026-10-01T10:{self.n // 60 % 60:02d}:{self.n % 60:02d}"
 
-    def asema(self, nimi):
+    def asema(self, nimi, tyyppi="StandardResection"):
         i, t = self._id()
         self.osat.append(f'<StationRecord ID="{i}" TimeStamp="{t}"><StationName>{nimi}</StationName>'
-                         '<TheodoliteHeight>1.5</TheodoliteHeight><StationType>StandardResection</StationType>'
+                         f'<TheodoliteHeight>1.5</TheodoliteHeight><StationType>{tyyppi}</StationType>'
                          '</StationRecord>')
         return i
 
@@ -51,9 +51,15 @@ class Tyo:
     def resektio(self, nimi, asema):
         self.piste(nimi, "", N, E, method="Resection", face=None, asema=asema)
 
+    def lopullinen(self, nimi, n, e):
+        """Piste Reductions-osioon (esim. koordinaattilistasta tuotu kiintopiste ilman PointRecordia)."""
+        self.lopulliset.append(f"<Point><Name>{nimi}</Name><Code>KP</Code><Grid><North>{n}</North>"
+                               f"<East>{e}</East><Elevation>12</Elevation></Grid></Point>")
+
     def jasenna(self):
         xml = ('<?xml version="1.0"?><JOBFile jobName="syn" product="x" TimeStamp="2026-10-01T10:00:00">'
-               "<FieldBook>" + "".join(self.osat) + "</FieldBook></JOBFile>")
+               "<FieldBook>" + "".join(self.osat) + "</FieldBook>"
+               "<Reductions>" + "".join(self.lopulliset) + "</Reductions></JOBFile>")
         return jx.jasenna_tyo(xml.encode())
 
 

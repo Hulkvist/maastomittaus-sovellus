@@ -199,6 +199,7 @@ def test_seinalinja_kasin_ilman_koodeja_ja_kaikki_janat_pois(monkeypatch):
     for nimi in ("tallenna_mittaukset_kantaan", "tallenna_raportti_kantaan"):
         monkeypatch.setattr(jx, nimi, mock.Mock(return_value=1))
     monkeypatch.setattr(jx, "tallenna_seinalinjat_kantaan", viivat)
+    monkeypatch.setattr(jx, "tallenna_lasketut_pisteet_kantaan", lasketut := mock.Mock(return_value=0))
     monkeypatch.setattr(jx, "tiedoston_muut_kiinteistot", mock.Mock(return_value=[]))
     monkeypatch.setattr(hk, "tunnista_kiinteisto_pisteparvesta", mock.Mock(return_value=("09102509510003", {}, 3)))
     tiedosto = _tyo_ilman_seinalinjakoodeja()
@@ -228,11 +229,56 @@ def test_seinalinja_kasin_ilman_koodeja_ja_kaikki_janat_pois(monkeypatch):
             [b for b in at.button if b.label == "Poista jana"][0].click().run()
             assert not virheet(at), virheet(at)
         assert any(c.value == "Viivoja ei ole." for c in at.caption)
-        assert any(b.label == "Lisää piste" for b in at.button)        # suorakulmainen mittaus toimii
         viivat.reset_mock()
+        lasketut.reset_mock()
+        [b for b in at.button if b.label == "Tallenna mittaukset kantaan"][0].click().run()
+        assert not virheet(at), virheet(at)
+        viivat.assert_not_called()
+        lasketut.assert_not_called()
+        # suorakulmaisella mittauksella laskettu piste ilman viivoja: DXF:ään ja kantaan
+        [n for n in at.number_input if n.key == "sl_suora_amitta"][0].set_value(2.0)
+        [n for n in at.number_input if n.key == "sl_suora_bmitta"][0].set_value(1.0)
+        [b for b in at.button if b.label == "Lisää piste"][0].click().run()
+        assert not virheet(at), virheet(at)
+        assert any(b.label == "Lataa seinälinja (DXF) (muokattu)" for b in at.get("download_button"))
         [b for b in at.button if b.label == "Tallenna mittaukset kantaan"][0].click().run()
     assert not virheet(at), virheet(at)
-    viivat.assert_not_called()
+    [kutsu] = lasketut.call_args_list
+    assert kutsu[0][0] == "09102509510003" and kutsu[0][2] == "kasin.jxl"
+    [laskettu] = kutsu[0][1]["lasketut_pisteet"]
+    assert (laskettu["nimi"], laskettu["e"], laskettu["n"]) == ("L1", E0 + 2.0, N0 - 1.0)
+
+
+def test_asema_tunnetulla_pisteella(monkeypatch):
+    """StationSetup-asema RTK-pisteellä näkyy asemapisteenä ja tallentuu asemana."""
+    import jobxml_tuonti as jx
+    from test_kojeasennot import GNSS_LAATU, Tyo
+
+    tyo = Tyo()
+    tyo.piste("100", "ASP", N0, E0, method="GpsStaticObservation", face=None, lisa=GNSS_LAATU)
+    tyo.piste("200", "LIP", N0 + 30, E0, method="GpsStaticObservation", face=None, lisa=GNSS_LAATU)
+    a = tyo.asema("100", "StationSetup")
+    tyo.kahdesti("200", N0 + 30, E0, a)
+    tyo.mta("200", N0 + 30, E0, a)
+    tyo.piste("1", "RAK", N0 + 8, E0 + 3, asema=a)
+    xml = ('<?xml version="1.0"?><JOBFile jobName="tunnettu" product="x" TimeStamp="2026-10-01T10:00:00">'
+           "<FieldBook>" + "".join(tyo.osat) + "</FieldBook></JOBFile>")
+    raportti = mock.Mock(return_value=1)
+    for nimi in ("tallenna_mittaukset_kantaan", "tallenna_seinalinjat_kantaan", "tallenna_lasketut_pisteet_kantaan"):
+        monkeypatch.setattr(jx, nimi, mock.Mock(return_value=0))
+    monkeypatch.setattr(jx, "tallenna_raportti_kantaan", raportti)
+    monkeypatch.setattr(jx, "tiedoston_muut_kiinteistot", mock.Mock(return_value=[]))
+    monkeypatch.setattr(hk, "tunnista_kiinteisto_pisteparvesta", mock.Mock(return_value=("09102509510003", {}, 3)))
+    at = sovellus()
+    with ladattu_tiedosto("jobxml_tiedosto", Ladattu("tunnettu.jxl", xml.encode())):
+        at.run()
+        assert not virheet(at), virheet(at)
+        assert any(e.label == "Asemapisteet (1 kpl)" for e in at.expander)
+        assert any(m.value == "**100** · Tunnettu asemapiste" for m in at.markdown)
+        [b for b in at.button if b.label == "Tallenna mittaukset kantaan"][0].click().run()
+    assert not virheet(at), virheet(at)
+    [asema] = raportti.call_args[0][1]["asemapisteet"]
+    assert (asema["nimi"], asema["tunnettu"], asema["e"], asema["n"]) == ("100", True, E0, N0)
 
 
 def _testi2(monkeypatch):
@@ -249,6 +295,7 @@ def test_mittausten_tallennus_vie_seinalinjan(monkeypatch):
     viivat = mock.Mock(return_value=1)
     monkeypatch.setattr(jx, "tallenna_mittaukset_kantaan", pisteet)
     monkeypatch.setattr(jx, "tallenna_seinalinjat_kantaan", viivat)
+    monkeypatch.setattr(jx, "tallenna_lasketut_pisteet_kantaan", lasketut := mock.Mock(return_value=0))
     raportti = mock.Mock(return_value=2)
     monkeypatch.setattr(jx, "tallenna_raportti_kantaan", raportti)
     muut = mock.Mock(return_value=["091-9-9-9"])
@@ -301,6 +348,7 @@ def test_seinalinjan_muokkaus_dxf_ja_tallennus(monkeypatch):
     for nimi in ("tallenna_mittaukset_kantaan", "tallenna_raportti_kantaan"):
         monkeypatch.setattr(jx, nimi, mock.Mock(return_value=1))
     monkeypatch.setattr(jx, "tallenna_seinalinjat_kantaan", viivat)
+    monkeypatch.setattr(jx, "tallenna_lasketut_pisteet_kantaan", lasketut := mock.Mock(return_value=0))
     monkeypatch.setattr(jx, "tiedoston_muut_kiinteistot", mock.Mock(return_value=[]))
     tiedosto = _testi2(monkeypatch)
     at = sovellus()

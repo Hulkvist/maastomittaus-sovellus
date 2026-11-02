@@ -112,7 +112,8 @@ def test_sivumitta_kartalta_irrallinen_piste():
                  "a_mitta": 4.25, "b_mitta": 1.5}
     uusi = sl.sovella_muokkaukset(tulos, [m])
     assert uusi["viivat"] == tulos["viivat"]
-    assert uusi["lasketut_pisteet"][-1] == {"nimi": "L3", "e": E0 + 4.25, "n": N0 - 1.5}
+    assert uusi["lasketut_pisteet"][-1] == {"nimi": "L3", "e": E0 + 4.25, "n": N0 - 1.5, "a": "1", "b": "2",
+                                            "a_mitta": 4.25, "b_mitta": 1.5}
     assert "a 4.25 m, b 1.5 m" in slm.kuvaus(m)
     # B viivan kärkenä (kärki 2 = piste 4, pohjoiseen): + oikealle = itään
     m = slm.muokkaukseksi({"tyyppi": "sivumitta", "a": {"piste": 0},

@@ -2270,8 +2270,9 @@ def piirra_seinalinja_kartta(tulos, out_path, hae_tausta=None, marginaali_m=5.0)
     fig, ax = plt.subplots(figsize=(8, 8))
 
     viivojen_pisteet = [viivan_pisteet(v) for v in tulos["viivat"]]
-    xs = [p["e"] for p in tulos["pisteet"]] + [q[0] for vp in viivojen_pisteet for q in vp]
-    ys = [p["n"] for p in tulos["pisteet"]] + [q[1] for vp in viivojen_pisteet for q in vp]
+    irralliset = tulos.get("lasketut_pisteet", [])
+    xs = [p["e"] for p in tulos["pisteet"] + irralliset] + [q[0] for vp in viivojen_pisteet for q in vp]
+    ys = [p["n"] for p in tulos["pisteet"] + irralliset] + [q[1] for vp in viivojen_pisteet for q in vp]
     bbox = None
     if xs:
         keski_x, keski_y = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
@@ -2301,7 +2302,10 @@ def piirra_seinalinja_kartta(tulos, out_path, hae_tausta=None, marginaali_m=5.0)
         if ryhma:
             ax.scatter([p["e"] for p in ryhma], [p["n"] for p in ryhma],
                        color=vari, s=30, zorder=2, label=f"koodi {koodi}")
-    for p in tulos["pisteet"]:
+    if irralliset:
+        ax.scatter([p["e"] for p in irralliset], [p["n"] for p in irralliset],
+                   marker="+", color="tab:red", s=80, zorder=3, label="laskettu piste")
+    for p in tulos["pisteet"] + irralliset:
         ax.annotate(str(p.get("nimi")), (p["e"], p["n"]), textcoords="offset points",
                     xytext=(4, 4), fontsize=8)
 
@@ -2335,7 +2339,8 @@ def dxf_taso(avain):
 
 def kirjoita_dxf(tulos, out_path):
     """Tasot: SEINALINJA (LWPOLYLINE), MITATUT_PISTEET (POINT), PISTETEKSTIT (TEXT),
-    LASKETUT_KULMAT (POINT). Tekstit ovat omalla tasollaan, koska QGIS tuo DXF:n
+    LASKETUT_KULMAT (POINT) ja LASKETUT_PISTEET (POINT, suorakulmaisella mittauksella lasketut
+    irralliset pisteet). Tekstit ovat omalla tasollaan, koska QGIS tuo DXF:n
     tekstit pisteinä -- tason voi piilottaa (MicroStationissa ne näkyvät tekstinä)."""
     import ezdxf
 
@@ -2344,6 +2349,7 @@ def kirjoita_dxf(tulos, out_path):
     doc.layers.add("MITATUT_PISTEET", color=3)
     doc.layers.add("PISTETEKSTIT", color=8)
     doc.layers.add("LASKETUT_KULMAT", color=1)
+    doc.layers.add("LASKETUT_PISTEET", color=1)
     msp = doc.modelspace()
 
     for viiva in tulos["viivat"]:
@@ -2363,6 +2369,11 @@ def kirjoita_dxf(tulos, out_path):
         koodi = " ".join(([kohde] if kohde else []) + [str(tyyppi)] + ([str(numero)] if numero != 1 else []))
         msp.add_text(f"{p.get('nimi')} ({koodi})",
                      height=0.2, dxfattribs={"layer": "PISTETEKSTIT"}
+                     ).set_placement((p["e"] + 0.1, p["n"] + 0.1))
+
+    for p in tulos.get("lasketut_pisteet", []):
+        msp.add_point((p["e"], p["n"], 0.0), dxfattribs={"layer": "LASKETUT_PISTEET"})
+        msp.add_text(f"{p['nimi']} ({LASKETTU_KOODI})", height=0.2, dxfattribs={"layer": "PISTETEKSTIT"}
                      ).set_placement((p["e"] + 0.1, p["n"] + 0.1))
 
     doc.saveas(out_path)
@@ -2513,8 +2524,9 @@ def sovella_muokkaukset(tulos, muokkaukset):
       {"tyyppi": "leikkaus", "viiva1", "viiva2", "paa1", "paa2"} -- kahden avoimen viivan päätejanat
           leikkauspisteeseen (päätä lyhennetään tai leikkauspiste lisätään) ja viivat yhdeksi (sama viiva:
           suljetaan); päät None = lähimmät päät
-      {"tyyppi": "piste", "nimi", "e", "n", ...} -- irrallinen laskettu piste (suorakulmainen mittaus)
-          tuloksen "lasketut_pisteet"-listaan; viivoihin se tulee vain, kun kärki napsautetaan siihen
+      {"tyyppi": "piste", "nimi", "e", "n", "a", "b", "a_mitta", "b_mitta"} -- irrallinen laskettu piste
+          (suorakulmainen mittaus pisteistä a ja b) tuloksen "lasketut_pisteet"-listaan (DXF ja kanta);
+          viivoihin se tulee vain, kun kärki napsautetaan siihen
       {"tyyppi": "suorakulmio", "nimi", "pohja", "karjet": [4 kärkeä kehän järjestyksessä]} -- kolmesta kulmasta
           täydennetty suorakulmio: jos avoimen viivan kärjet ovat juuri kolme ensimmäistä, viiva suljetaan
           neljännellä kärjellä; muuten uusi suljettu viiva "nimi" viivan "pohja" tasolle
@@ -2613,7 +2625,8 @@ def sovella_muokkaukset(tulos, muokkaukset):
             viivat[viiva["nimi"]] = viiva
             continue
         if tyyppi == "piste":
-            uusi["lasketut_pisteet"].append({"nimi": m["nimi"], "e": m["e"], "n": m["n"]})
+            uusi["lasketut_pisteet"].append({"nimi": m["nimi"], "e": m["e"], "n": m["n"],
+                                            **{k: m.get(k) for k in ("a", "b", "a_mitta", "b_mitta")}})
             continue
         if tyyppi == "suorakulmio":
             kolme = m["karjet"][:3]
