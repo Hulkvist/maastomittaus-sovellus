@@ -826,7 +826,7 @@ def _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi):
                           key=f"seinalinja_kartta_{valittu}")
         except Exception as karttavirhe:
             st.caption(f"Zoomattavaa seinälinjakarttaa ei voitu piirtää ({_virheteksti(karttavirhe)}).")
-    if not sl_tulos["viivat"]:
+    if not sl_tulos["viivat"] and not sl_tulos.get("lasketut_pisteet"):
         return sl_tulos, poikkeamat_lidar
 
     nimen_loppu = "" if valittu is None else "_" + valittu.replace(" ", "_")
@@ -848,7 +848,9 @@ def _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi):
         [{"Viiva": viiva["nimi"], "Nimi": k["nimi"], "Laji": k["laji"],
           "E": round(k["e"], 3), "N": round(k["n"], 3),
           "Korkeus": round(k["z"], 3) if k["z"] is not None else None}
-         for viiva in sl_tulos["viivat"] for k in viiva["karjet"]],
+         for viiva in sl_tulos["viivat"] for k in viiva["karjet"]]
+        + [{"Viiva": "(irrallinen)", "Nimi": p["nimi"], "Laji": "laskettu piste", "E": round(p["e"], 3),
+            "N": round(p["n"], 3), "Korkeus": None} for p in sl_tulos.get("lasketut_pisteet", [])],
         width="stretch",
     )
 
@@ -871,7 +873,7 @@ def _seinalinja_osio(s, kaikki_pisteet, job_nimi):
                        "(kolmesta kulmasta) tai suorakulmainen mittaus kartan alla. Piirretty viiva menee "
                        "DXF:ään, PNG:hen ja kantaan kuten automaattinen.")
             tulokset = _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi)
-        return tulokset if s["tulos"]["viivat"] else None
+        return tulokset if s["tulos"]["viivat"] or s["tulos"].get("lasketut_pisteet") else None
     with st.expander("Seinälinja (koodit 8 / 5 / 100)", expanded=True):
         st.caption(
             "8 = viivan alku/loppu, 5 = talon kulma, 100 = piste seinälinjalla (ei kulma). "
@@ -928,7 +930,10 @@ def _mittauksen_yhteenveto(raportti):
 
 def _asemapisteet(asemapisteet):
     for a in asemapisteet:
-        st.markdown(f"**{a['nimi']}**")
+        st.markdown(f"**{a['nimi']}**" + (f" · {a['maarittely']}" if a.get("maarittely") else ""))
+        if a.get("tunnettu"):
+            st.caption(f"Asema tunnetulla pisteellä: koordinaatit pisteestä {a['nimi']}, suunta liitospisteistä "
+                       "(ei resektiota, joten Trimblen keskivirheitä ei ole).")
         col1, col2, col3, col_kartta = st.columns([1, 1, 1, 1.2])
         with col1:
             se_n = a.get("se_n_m")
@@ -1035,12 +1040,16 @@ def _tallenna_mittaukset(tunnus, osoite, kaupunki, ladattu_tiedosto, raportti, k
             viivoja = (jx.tallenna_seinalinjat_kantaan(tunnus, sl_tallennettava[0], ladattu_tiedosto.name,
                                                        hk.DB_CONN, sl_tallennettava[1])
                        if sl_tallennettava else 0)
+            lasketut = (jx.tallenna_lasketut_pisteet_kantaan(tunnus, sl_tallennettava[0], ladattu_tiedosto.name,
+                                                             hk.DB_CONN)
+                        if sl_tallennettava else 0)
             asemia = jx.tallenna_raportti_kantaan(tunnus, raportti, kaikki_pisteet, hylatyt, pdf_bytes, hk.DB_CONN)
         st.success(
             f"{maara} pistettä tallennettu kentalla_mitatut_pisteet-tauluun "
             f"({len(kaikki_pisteet) - len(tallennettavat)} liitospisteen RTK-alkuperäismittausta "
             "jätettiin pois tuplapisteiden välttämiseksi)"
             + (f", {viivoja} seinälinjaa seinalinjat-tauluun" if viivoja else "")
+            + (f", {lasketut} laskettua pistettä kentalla_mitatut_pisteet-tauluun" if lasketut else "")
             + f", mittausraportti{'' if pdf_bytes else ' (ilman PDF:ää)'} mittausraportit-tauluun"
             + f" ja {asemia} asemapistettä asemapisteet-tauluun."
         )
@@ -1358,6 +1367,7 @@ def _mittausten_tuonti():
                     "Anna kiinteistötunnus sivun alussa (Kiinteistötunnus, johon mittaukset liittyvät).")
     st.caption("Tallennus vie kantaan pisteet, mittausraportin (yhteenveto ja PDF) ja asemapisteet"
                + (" sekä yllä näkyvän seinälinjan (valittu järjestys, kantakartta- ja LiDAR-valinnat)"
+                  + (" ja lasketut pisteet" if sl_tallennettava[0].get("lasketut_pisteet") else "")
                   if sl_tallennettava else "")
                + ". Saman kiinteistön ja tiedoston aiemmat pisteet, raportti ja asemat"
                + (" sekä seinälinja" if sl_tallennettava else "") + " korvataan.")

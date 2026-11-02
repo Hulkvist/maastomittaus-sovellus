@@ -160,7 +160,7 @@ def on_gnss_mittaus(method):
 
 
 def nayta_mittaustapa(kategoria, method, survey_method):
-    if kategoria == 'Asemapiste':
+    if kategoria == 'Asemapiste' and method == 'Resection':
         return 'Yhteiskäyttö'
     if kategoria in ('Liitospiste', 'Korkeusliitos'):
         if on_gnss_mittaus(method):
@@ -168,7 +168,7 @@ def nayta_mittaustapa(kategoria, method, survey_method):
         return 'Yhteiskäyttö'
     if kategoria == 'Liitospiste (alkuperäinen RTK-mittaus)':
         return 'RTK'
-    if kategoria in ('Merkintäpiste', 'Kartoituspiste', 'Suunnittelupiste (Construction)'):
+    if kategoria in ('Merkintäpiste', 'Kartoituspiste', 'Suunnittelupiste (Construction)', 'Asemapiste'):
         if method and method.startswith('GpsContinuous'):
             return 'RTK (jatkuva)'
         if on_gnss_mittaus(method):
@@ -534,6 +534,7 @@ def laske_asemapisteen_laatu(
     liitospisteet,
     sijainti,
     residuaalit,
+    tunnettu=False,
 ):
     """Laskee asemapisteen kokonaislaadun.
 
@@ -542,6 +543,8 @@ def laske_asemapisteen_laatu(
       liitospisteet: lista muodossa [(N, E, PDOP), ...]
       sijainti: nykyisen sijaintiluokituksen sanakirja tai None
       residuaalit: lista residuaalisanakirjoja
+      tunnettu: asema tunnetulla pisteellä (ei resektio): yksi liitospiste riittää suunnaksi, joten
+        liitospisteiden määrää ja kulmapeittoa ei arvioida (laatu residuaaleista ja PDOP:sta)
     """
     koordinaatit = [
         (n, e)
@@ -590,7 +593,7 @@ def laske_asemapisteen_laatu(
     )
 
     sijaintipisteet = _sijainti_pisteet(sijainti)
-    maarapisteet = _pisteet_maaran_mukaan(maara)
+    maarapisteet = None if tunnettu else _pisteet_maaran_mukaan(maara)
     residuaalipisteet = _residuaali_pisteet(
         suurin_residuaali
     )
@@ -598,7 +601,7 @@ def laske_asemapisteen_laatu(
 
     kulmapeitto = None
     kulmapeittopisteet = None
-    if asemapiste is not None:
+    if asemapiste is not None and not tunnettu:
         kulmapeitto = _kulmapeitto_asteina(
             asemapiste,
             koordinaatit,
@@ -655,7 +658,10 @@ def laske_asemapisteen_laatu(
 
     varoitukset = []
 
-    if maara == 2:
+    if tunnettu and residuaalipisteet is None and kokonaispiste is not None:
+        varoitukset.append("Asema tunnetulla pisteellä: ei residuaaleja, laatu vain liitospisteiden PDOP:sta")
+
+    if maara == 2 and not tunnettu:
         varoitukset.append("Vain 2 liitospistettä")
         if kokonaispiste is not None:
             kokonaispiste = min(kokonaispiste, 69.0)
@@ -765,7 +771,34 @@ def _koordinaatisto(content):
 
 TAPAHTUMAT = {"StartRoverSurvey": "Roveri käynnistetty", "EndSurvey": "Mittaus lopetettu",
               "RTKInitialised": "RTK alustettu", "RTKNotInitialised": "RTK ei alustettu"}
-ASEMATYYPIT = {"StandardResection": "Vapaa asemapiste", "KnownStation": "Tunnettu asemapiste"}
+ASEMATYYPIT = {"StandardResection": "Vapaa asemapiste", "HelmertResection": "Vapaa asemapiste (Helmert)",
+               "StationSetup": "Tunnettu asemapiste", "StationSetupPlus": "Tunnettu asemapiste (Station setup plus)",
+               "KnownStation": "Tunnettu asemapiste"}
+RESEKTIOTYYPIT = {"StandardResection", "HelmertResection"}   # muut asemat ovat tunnetulla pisteellä
+
+
+def _lopulliset_koordinaatit(content):
+    """Reductions-osion pisteet {nimi: (n, e, korkeus, koodi)}: Trimblen lopullinen koordinaatti nimelle."""
+    osio = re.search(r'<Reductions>(.*?)</Reductions>', content, re.S)
+    tulos = {}
+    for m in re.finditer(r'<Point>(.*?)</Point>', osio.group(1) if osio else "", re.S):
+        n, e, z = _grid_koordinaatit(m.group(1))
+        if n is not None and e is not None and (n, e) != (0.0, 0.0):
+            tulos[_poimi('Name', m.group(1))] = (n, e, z, _poimi('Code', m.group(1)))
+    return tulos
+
+
+def _tunnetun_aseman_piste(tietueet, nimi, ennen, lopulliset):
+    """Tunnetun aseman koordinaatit: viimeisin samanniminen poistamaton PointRecord ennen asemaa
+    (myös käsin syötetty), muuten Reductions. Palauttaa (n, e, korkeus, koodi, tietueen pos tai None)
+    tai None, jos pistettä ei ole."""
+    for pos, tag, _, _, block in reversed(tietueet):
+        if pos >= ennen or tag != 'PointRecord' or _poimi('Name', block) != nimi or _poimi('Deleted', block) == 'true':
+            continue
+        n, e, z = _grid_koordinaatit(block)
+        if n is not None and e is not None and (n, e) != (0.0, 0.0):
+            return n, e, z, _poimi('Code', block), pos
+    return (*lopulliset[nimi], None) if nimi in lopulliset else None
 
 
 def _asetukset(content):
@@ -1021,6 +1054,8 @@ def jasenna_tyo(tiedosto_bytes, lahdetiedosto="tuntematon.xml"):
             station_lista.append((pos, rid, nimi))
             ilmasto = ilmastot.get(_poimi('AtmosphereID', block), "")
             station_tiedot[rid] = {
+                "tyyppi": _poimi('StationType', block),
+                "aikaleima": aikaleima,
                 "kojekorkeus": _poimi_float('TheodoliteHeight', block),
                 "maarittely": ASEMATYYPIT.get(_poimi('StationType', block), _poimi('StationType', block)),
                 "mittakaava": _poimi_float('ScaleFactor', block),
@@ -1130,6 +1165,7 @@ def jasenna_tyo(tiedosto_bytes, lahdetiedosto="tuntematon.xml"):
                 "station_record_id": station_id,
                 "aikaleima": aikaleima, "lahdetiedosto": lahdetiedosto,
                 "_classification": classification,
+                "_pos": pos,
                 "kahdesta_kojeasennosta": on_kojeasento,
                 "havainto": _havainto(block, tahykset),
                 "tarkkuus_h": _poimi_float('Horizontal', block) if '<Precision>' in block else None,
@@ -1138,6 +1174,30 @@ def jasenna_tyo(tiedosto_bytes, lahdetiedosto="tuntematon.xml"):
                 "ominaisuudet": _ominaisuudet(block),
                 **pdop_info,
             })
+
+    # --- Asema tunnetulla pisteellä (StationSetup): Resection-tietuetta ei ole, joten aseman
+    # koordinaatit ovat samannimisen pisteen. Asema ilman havaintoja (esim. pikamittauksen "New")
+    # ohitetaan. Asemapisteeksi mitattu kartoituspiste muuttuu Asemapisteeksi (ei KRD:hen kartoituksena).
+    resektoidut = {a["station_record_id"] for a in asemapisteet_raaka}
+    havaitut = {p["station_record_id"] for p in pisteet_validit}
+    lopulliset = _lopulliset_koordinaatit(content)
+    for spos, sid, sname in station_lista:
+        if sid in resektoidut or sid not in havaitut or station_tiedot[sid]["tyyppi"] in RESEKTIOTYYPIT:
+            continue
+        piste = _tunnetun_aseman_piste(tietueet, sname, spos, lopulliset)
+        if piste is None:
+            continue
+        n, e, korkeus, koodi, lahde = piste
+        asemapisteet_raaka.append({
+            "pos": spos, "nimi": sname, "koodi": koodi, "n": n, "e": e, "korkeus": korkeus,
+            "se_n": None, "se_e": None, "se_h": None, "aikaleima": station_tiedot[sid]["aikaleima"],
+            "station_record_id": sid, "tunnettu": True,
+        })
+        resection_positions.append((spos, sid))   # Station setup plus -residuaalit asemalle
+        for p in pisteet_validit:
+            if p["_pos"] == lahde and p["kategoria"] == "Kartoituspiste":
+                p["kategoria"] = "Asemapiste"
+    asemapisteet_raaka.sort(key=lambda a: a["pos"])
 
     # --- Residuaalien kohdistus SIJAINNIN perusteella ---
     resection_positions.sort(key=lambda x: x[0])
@@ -1237,7 +1297,7 @@ def jasenna_tyo(tiedosto_bytes, lahdetiedosto="tuntematon.xml"):
                 if n is not None and e is not None
             ]
         sijainti = None
-        if a["n"] is not None and a["e"] is not None and len(liitospisteet_koord) >= 3:
+        if not a.get("tunnettu") and a["n"] is not None and a["e"] is not None and len(liitospisteet_koord) >= 3:
             sijainti = laske_asemapisteen_sijaintiluokitus((a["n"], a["e"]), liitospisteet_koord)
 
         liitospiste_nimet = [nimi for (nimi, _, _) in station_backsights.get(a["station_record_id"], [])]
@@ -1280,6 +1340,7 @@ def jasenna_tyo(tiedosto_bytes, lahdetiedosto="tuntematon.xml"):
             liitospisteet_laatua_varten,
             sijainti,
             residuaalit,
+            tunnettu=a.get("tunnettu", False),
         )
 
         kojeasento_liitospisteet = [
@@ -1301,6 +1362,7 @@ def jasenna_tyo(tiedosto_bytes, lahdetiedosto="tuntematon.xml"):
             "se_korkeus_m": a["se_h"],
             "kojekorkeus": tiedot.get("kojekorkeus"),
             "maarittely": tiedot.get("maarittely"),
+            "tunnettu": a.get("tunnettu", False),
             "mittakaava": tiedot.get("mittakaava"),
             "mittakaava_tyyppi": tiedot.get("mittakaava_tyyppi"),
             "ilmasto": tiedot.get("ilmasto"),
@@ -1651,6 +1713,34 @@ def tallenna_seinalinjat_kantaan(kiinteistotunnus, tulos, lahdetiedosto, db_conn
             )
             lisatty += 1
     return lisatty
+
+
+LASKETTU_PISTE = "Laskettu piste"
+
+
+def tallenna_lasketut_pisteet_kantaan(kiinteistotunnus, tulos, lahdetiedosto, db_conn):
+    """Seinälinjan muokkauksessa suorakulmaisella mittauksella lasketut irralliset pisteet
+    (tulos["lasketut_pisteet"]) kentalla_mitatut_pisteet-tauluun: kuvaus "Laskettu piste",
+    mittaustapa "Suorakulmainen mittaus", tarkkuusluokka "laskettu" ja ominaisuuksissa A, B ja mitat.
+    Saman kiinteistön ja lähdetiedoston aiemmat lasketut pisteet korvataan. Palauttaa määrän."""
+    import hae_kiintopisteet as hk
+
+    pisteet = (tulos or {}).get("lasketut_pisteet", [])
+    with hk.kanta(db_conn) as cur:
+        cur.execute("DELETE FROM kentalla_mitatut_pisteet WHERE kiinteistotunnus = %s AND lahdetiedosto = %s "
+                    "AND kuvaus = %s;", (kiinteistotunnus, lahdetiedosto, LASKETTU_PISTE))
+        for p in pisteet:
+            mitat = [f"{x}: {p[k]}" for x, k in (("A", "a"), ("B", "b")) if p.get(k)]
+            mitat += [f"{x} = {float(p[k]):.3f} m" for x, k in (("a", "a_mitta"), ("b", "b_mitta")) if p.get(k) is not None]
+            cur.execute(
+                f"""INSERT INTO kentalla_mitatut_pisteet
+                    (kiinteistotunnus, pistetunnus, kuvaus, mittaustapa, tarkkuusluokka, lahdetiedosto,
+                     ominaisuudet, geom)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), {DB_SRID}));""",
+                (kiinteistotunnus, p["nimi"], LASKETTU_PISTE, "Suorakulmainen mittaus", sl.LASKETTU_KOODI,
+                 lahdetiedosto, ", ".join(mitat) or None, p["e"], p["n"]),
+            )
+    return len(pisteet)
 
 
 LAATULUOKAT = ("Erinomainen", "Hyvä", "Tyydyttävä", "Heikko", "Huono", "Ei laskettavissa")  # paras ensin

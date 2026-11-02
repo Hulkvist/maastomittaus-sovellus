@@ -239,6 +239,26 @@ def test_seinalinjojen_tallennus_ja_poistot(db):
     assert jx.poista_kaikki_mittaukset(db) == (0, viivoja, 0)
 
 
+def test_lasketut_pisteet_kantaan(db):
+    """Suorakulmaisella mittauksella lasketut irralliset pisteet kentalla_mitatut_pisteet-tauluun;
+    uudelleentallennus korvaa ne eikä koske mitattuihin pisteisiin."""
+    mitattu = {"nimi": "1", "kategoria": "Kartoituspiste", "e": E0, "n": N0, "lahdetiedosto": "laskettu.jxl"}
+    jx.tallenna_mittaukset_kantaan("091-9-9-9", [mitattu], db)
+    tulos = {"viivat": [], "lasketut_pisteet": [
+        {"nimi": "L1", "e": E0 + 2.5, "n": N0 - 1.5, "a": "1", "b": "2", "a_mitta": 2.5, "b_mitta": 1.5},
+        {"nimi": "L2", "e": E0 + 1.0, "n": N0}]}
+    assert jx.tallenna_lasketut_pisteet_kantaan("091-9-9-9", tulos, "laskettu.jxl", db) == 2
+    assert jx.tallenna_lasketut_pisteet_kantaan("091-9-9-9", tulos, "laskettu.jxl", db) == 2
+    rivit = kysy(db, "SELECT pistetunnus, kuvaus, mittaustapa, tarkkuusluokka, ominaisuudet, ST_X(geom), ST_Y(geom) "
+                     "FROM kentalla_mitatut_pisteet WHERE kiinteistotunnus = '091-9-9-9' ORDER BY pistetunnus;")
+    assert rivit == [
+        ("1", "Kartoituspiste", None, None, None, E0, N0),
+        ("L1", "Laskettu piste", "Suorakulmainen mittaus", "laskettu", "A: 1, B: 2, a = 2.500 m, b = 1.500 m",
+         E0 + 2.5, N0 - 1.5),
+        ("L2", "Laskettu piste", "Suorakulmainen mittaus", "laskettu", None, E0 + 1.0, N0)]
+    assert jx.poista_mittaukset_kannasta("091-9-9-9", db)[0] == 3
+
+
 def test_helsingissa_vain_omat_kiintopisteet(db):
     with hk.kanta(db) as cur:
         cur.execute("INSERT INTO kiintopisteet (pistetunnus, luokka, geom) VALUES "
