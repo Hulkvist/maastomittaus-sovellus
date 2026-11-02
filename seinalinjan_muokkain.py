@@ -1,8 +1,16 @@
 """
 seinalinjan_muokkain.py -- Seinälinjan muokkauskartta sovellukseen (Streamlitin oma komponentti,
-st.components.v2): kärkiä raahataan hiirellä ja ne napsahtavat mitattuun pisteeseen tai toisen viivan
-kärkeen, viivaa klikkaamalla tulee uusi kärki, viivan oikea klikkaus poistaa janan ja kärjen oikea klikkaus
-poistaa kärjen. Kolmen pisteen tai kärjen tuplaklikkaus peräkkäin täydentää ne suorakulmioksi.
+st.components.v2). Toimii hiirellä, kynällä ja sormella (maastotabletti, esim. Trimble TSC7): kartan
+yläpuolen työkalu valitaan napilla, joten oikeaa painiketta, tuplaklikkausta ja näppäimistöä ei tarvita.
+
+- Siirrä: kärkeä raahataan, ja se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen.
+- Lisää kärki: viivan napautus tekee uuden kärjen.
+- Poista: kärjen tai janan napautus valitsee sen, ja poisto vahvistetaan.
+- Suorakulmio: kolmen pisteen tai kärjen napautus täydentää ne suorakulmioksi.
+- Uusi viiva, Jatka ja Yhdistä.
+
+Hiirellä vanhat pikatoiminnot toimivat edelleen: viivan klikkaus = uusi kärki, oikea klikkaus = poista,
+tuplaklikkaus = suorakulmion kulma, Esc = peruuta. Kynällä ja sormella napsahdussäde on isompi.
 
 Kartta toimii selaimessa WGS84:ssä (Leaflet samasta CDN:stä kuin foliumin kartat). Muokkaus palaa
 Pythonille tapahtumana, ja muokkaukseksi() tekee siitä seinalinja.sovella_muokkaukset()-muokkauksen
@@ -16,28 +24,43 @@ import hae_kiintopisteet as hk
 import seinalinja as sl
 
 LEAFLET = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist"
-NAPSAHDUS_PX = 12   # kärki napsahtaa pisteeseen tätä lähempänä (näytön pikseleinä)
+NAPSAHDUS_PX = 12        # hiirellä kärki napsahtaa pisteeseen tätä lähempänä (näytön pikseleinä)
+NAPSAHDUS_KYNA_PX = 24   # kynällä ja sormella (kärki jää kynän alle, napautus osuu epätarkemmin)
 
 _CSS = """
-.slm-kartta { width: 100%; height: 620px; border: 1px solid #ccc; border-radius: 4px; }
-.slm-karki { background: #fff; border: 2px solid #000; border-radius: 2px; }
+.slm-kartta { width: 100%; height: min(620px, calc(100vh - 170px)); min-height: 360px; border: 1px solid #ccc;
+              border-radius: 4px; touch-action: none; }
+.slm-kahva { background: transparent; border: none; }
+.slm-karki { position: absolute; left: 8px; top: 8px; width: 12px; height: 12px; box-sizing: border-box;
+             background: #fff; border: 2px solid #000; border-radius: 2px; }
 .slm-karki.laskettu { border-color: #d62728; }
 .slm-karki.kasin { border-color: #ff7f0e; }
 .slm-karki.napsahtaa { background: #2ca02c; border-color: #2ca02c; }
-.slm-nimi { background: transparent; border: none; box-shadow: none; font-size: 11px; color: #333;
+.slm-nimi { background: transparent; border: none; box-shadow: none; font-size: 12px; color: #222;
             padding: 0; text-shadow: 0 0 3px #fff, 0 0 3px #fff; }
 .slm-nimi::before { display: none; }
-.slm-piirto { background: #fff; padding: 4px; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
-.slm-piirto button { font-size: 13px; margin: 0 2px; padding: 3px 8px; cursor: pointer; }
-.slm-piirto .slm-ohje { font-size: 12px; margin: 4px 2px 0; color: #333; max-width: 260px; }
+.slm-tyokalut { background: #fff; padding: 4px 0 6px; }
+.slm-tyokalut button { font-size: 15px; min-height: 44px; min-width: 44px; margin: 2px; padding: 6px 12px;
+                       border: 1px solid #999; border-radius: 6px; background: #f6f6f6; color: #111;
+                       cursor: pointer; touch-action: manipulation; }
+.slm-tyokalut button.paalla { background: #1f77b4; border-color: #1f77b4; color: #fff; font-weight: 600; }
+.slm-tyokalut button.vahva { background: #d62728; border-color: #d62728; color: #fff; font-weight: 600; }
+.slm-tyokalut button.valmis { background: #2ca02c; border-color: #2ca02c; color: #fff; font-weight: 600; }
+.slm-tyokalut .slm-ohje { font-size: 14px; margin: 6px 4px 2px; color: #222; }
 .slm-piirtaa { cursor: crosshair !important; }
-.slm-kulma { background: #ff7f0e; color: #fff; border-radius: 50%; font: bold 11px sans-serif;
-             text-align: center; line-height: 16px; box-shadow: 0 0 0 2px #fff; }
+.slm-kulma { background: #ff7f0e; color: #fff; border-radius: 50%; font: bold 14px sans-serif;
+             text-align: center; line-height: 22px; box-shadow: 0 0 0 2px #fff; }
+.slm-vihje { position: absolute; z-index: 1000; pointer-events: none; background: #2ca02c; color: #fff;
+             font: bold 14px sans-serif; padding: 4px 8px; border-radius: 4px; white-space: nowrap;
+             transform: translate(-50%, -100%); display: none; }
+.slm-kartta .leaflet-bar a { width: 40px; height: 40px; line-height: 40px; font-size: 22px; }
+.slm-kartta .leaflet-control-layers-toggle { width: 44px; height: 44px; }
 """
 
 _JS = """
 const LEAFLET = "%(leaflet)s";
 const NAPSAHDUS_PX = %(napsahdus)d;
+const NAPSAHDUS_KYNA_PX = %(napsahdus_kyna)d;
 const LASKETTU_KOODI = "%(laskettu)s";
 
 async function lataaLeaflet() {
@@ -50,157 +73,203 @@ async function lataaLeaflet() {
   return await window.__slmLeaflet;
 }
 
-// Uuden viivan piirto: nappi kartan kulmassa; klikkaukset lisäävät kärkiä (napsahtavat pisteisiin),
-// tuplaklikkaus tai Valmis lopettaa, ensimmäisen kärjen klikkaus sulkee viivan, Esc peruuttaa.
-function luoPiirto(L, tila) {
+const TYOKALUT = [["siirra", "✋ Siirrä"], ["lisaa", "+ Lisää kärki"], ["poista", "🗑 Poista"],
+                  ["suorakulmio", "∟ Suorakulmio"], ["piirra", "✏ Uusi viiva"], ["jatka", "⇥ Jatka"],
+                  ["yhdista", "✕ Yhdistä"]];
+const OHJEET = {
+  siirra: "Raahaa kärkeä: se napsahtaa mitattuun pisteeseen tai toisen viivan kärkeen (vihreä). "
+    + "Napautus näyttää kärjen tai viivan tiedot.",
+  lisaa: "Napauta viivaa: siihen tulee uusi kärki (napsahtaa lähellä olevaan pisteeseen).",
+  poista: "Napauta kärkeä tai janaa, ja vahvista poisto.",
+  suorakulmio: "Napauta kolmea pistettä tai kärkeä: neljäs kulma lasketaan (saman napautus = pois).",
+  piirra: "Napauta pisteitä järjestyksessä (napsahtaa pisteeseen). Valmis lopettaa, ensimmäisen pisteen "
+    + "napautus sulkee viivan.",
+  jatka: "Napauta avointa viivaa sen pään läheltä, jota jatketaan lähimpään viivaan.",
+  yhdista: "Napauta ensimmäistä avointa viivaa yhdistettävän pään läheltä, sitten toista.",
+};
+
+// Työkalut kartan yläpuolella; tila.tyokalu = valittu työkalu. Kaikki napautukset kulkevat
+// napautus()-funktion kautta, joka etsii kohteen pikseleinä (isompi säde kynällä ja sormella), joten
+// pienen kärjen tai ohuen viivan ei tarvitse osua kohdalleen.
+function luoTyokalut(L, tila) {
   const { kartta } = tila;
   const taso = L.layerGroup().addTo(kartta);
-  const piirto = tila.piirto = { paalla: false, karjet: [] };
-  const ohjain = L.control({ position: "topleft" });
-  ohjain.onAdd = () => {
-    const div = L.DomUtil.create("div", "slm-piirto");
-    div.innerHTML = '<button data-t="aloita">✏ Uusi viiva</button>'
-      + '<button data-t="jatka" title="Jatka avoimen viivan päätä lähimpään viivaan">⇥ Jatka</button>'
-      + '<button data-t="yhdista" title="Yhdistä kaksi avointa viivaa leikkauspisteessä">✕ Yhdistä</button>'
-      + '<button data-t="valmis" style="display:none">Valmis</button>'
-      + '<button data-t="peruuta" style="display:none">Peruuta</button>'
-      + '<div class="slm-ohje" style="display:none"></div>';
-    L.DomEvent.disableClickPropagation(div);
-    div.querySelector('[data-t="aloita"]').onclick = () => aseta(true);
-    div.querySelector('[data-t="jatka"]').onclick = () => aseta("jatka");
-    div.querySelector('[data-t="yhdista"]').onclick = () => aseta("yhdista");
-    div.querySelector('[data-t="valmis"]').onclick = () => piirto.valmis();
-    div.querySelector('[data-t="peruuta"]').onclick = () => aseta(false);
-    piirto.div = div;
-    return div;
-  };
-  ohjain.addTo(kartta);
+  // Palkki kartan yläpuolella (ei peitä karttaa pienellä näytöllä)
+  const div = document.createElement("div");
+  div.className = "slm-tyokalut";
+  div.innerHTML = TYOKALUT.map(([t, n]) => `<button data-t="${t}">${n}</button>`).join("")
+    + '<div class="slm-ohje"></div>'
+    + '<button data-a="valmis" class="valmis">✔ Valmis</button>'
+    + '<button data-a="vahvista" class="vahva">Poista valittu</button>'
+    + '<button data-a="peruuta">Peruuta</button>';
+  for (const b of div.querySelectorAll("[data-t]")) b.onclick = () => aseta(b.dataset.t);
+  div.querySelector('[data-a="valmis"]').onclick = () => valmis();
+  div.querySelector('[data-a="vahvista"]').onclick = () => { if (tila.valittu) poista(tila.valittu); };
+  div.querySelector('[data-a="peruuta"]').onclick = () => aseta("siirra");
+  kartta.getContainer().before(div);
+  const nappi = (a) => div.querySelector(`[data-a="${a}"]`);
+  const ohje = (teksti) => { div.querySelector(".slm-ohje").textContent = teksti; };
+  const laheta = (m) => tila.setTriggerValue("muokkaus", m);
 
-  const OHJEET = {
-    piirto: "Klikkaa pisteitä järjestyksessä (napsahtaa pisteeseen). Tuplaklikkaus tai Valmis lopettaa, "
-      + "ensimmäisen pisteen klikkaus sulkee viivan, Esc peruuttaa.",
-    jatka: "Klikkaa avointa viivaa sen pään läheltä, jota jatketaan. Esc peruuttaa.",
-    yhdista: "Klikkaa ensimmäistä avointa viivaa yhdistettävän pään läheltä, sitten toista. Esc peruuttaa.",
-  };
-  // tila: false, true (uusi viiva), "jatka" tai "yhdista"
   function aseta(t) {
-    const paalla = !!t;
-    tila.tyhjennaKulmat();
-    piirto.paalla = t === true;
-    tila.tyokalu = typeof t === "string" ? t : null;
-    piirto.valittu = null;
-    piirto.karjet = [];
+    tila.tyokalu = t;
+    tila.piirto = [];
+    tila.valittu = null;
+    tila.kulmat = [];
+    tila.yhdistettava = null;
     taso.clearLayers();
-    for (const n of ["aloita", "jatka", "yhdista"]) piirto.div.querySelector(`[data-t="${n}"]`).style.display = paalla ? "none" : "";
-    piirto.div.querySelector('[data-t="valmis"]').style.display = t === true ? "" : "none";
-    piirto.div.querySelector('[data-t="peruuta"]').style.display = paalla ? "" : "none";
-    const ohje = piirto.div.querySelector(".slm-ohje");
-    ohje.style.display = paalla ? "" : "none";
-    ohje.textContent = paalla ? OHJEET[t === true ? "piirto" : t] : "";
-    kartta.getContainer().classList.toggle("slm-piirtaa", paalla);
-    tila.ryhma.eachLayer((l) => { if (l.dragging) paalla ? l.dragging.disable() : l.dragging.enable(); });
+    for (const b of div.querySelectorAll("[data-t]")) b.classList.toggle("paalla", b.dataset.t === t);
+    nappi("valmis").style.display = t === "piirra" ? "" : "none";
+    nappi("vahvista").style.display = "none";
+    nappi("peruuta").style.display = t === "siirra" ? "none" : "";
+    ohje(OHJEET[t]);
+    kartta.getContainer().classList.toggle("slm-piirtaa", t !== "siirra");
+    for (const m of tila.merkit || []) t === "siirra" ? m.dragging.enable() : m.dragging.disable();
   }
-  piirto.aseta = aseta;
+  tila.aseta = aseta;
 
-  // Jatka / Yhdistä: viivan klikkaus; pää = klikkausta lähempi pää
-  tila.tyokaluKlikkaus = (v, ll) => {
-    if (v.suljettu) return;
-    const p = kartta.latLngToContainerPoint(ll);
-    const d = (k) => p.distanceTo(kartta.latLngToContainerPoint(L.latLng(k[0], k[1])));
-    const paa = d(v.karjet[0]) <= d(v.karjet[v.karjet.length - 1]) ? "alku" : "loppu";
-    if (tila.tyokalu === "jatka") {
-      tila.setTriggerValue("muokkaus", { tyyppi: "jatka", viiva: v.nimi, paa });
-      aseta(false);
-    } else if (!piirto.valittu) {
-      piirto.valittu = { viiva: v.nimi, paa };
-      const k = paa === "alku" ? v.karjet[0] : v.karjet[v.karjet.length - 1];
-      L.circleMarker([k[0], k[1]], { radius: 8, color: "#d62728", fillOpacity: 0.3 }).addTo(taso);
-      piirto.div.querySelector(".slm-ohje").textContent = `${v.nimi} (${paa}) valittu. Klikkaa toista viivaa.`;
-    } else {
-      tila.setTriggerValue("muokkaus", { tyyppi: "leikkaus", viiva1: piirto.valittu.viiva, paa1: piirto.valittu.paa,
-                                         viiva2: v.nimi, paa2: paa });
-      aseta(false);
-    }
-  };
-
-  function piirra() {
+  function piirraUusi() {
     taso.clearLayers();
-    const ll = piirto.karjet.map((k) => k.ll);
-    if (ll.length > 1) L.polyline(ll, { color: "#d62728", weight: 3, dashArray: "6 6" }).addTo(taso);
-    for (const p of ll) L.circleMarker(p, { radius: 5, color: "#d62728", fillOpacity: 1 }).addTo(taso);
+    const ll = tila.piirto.map((k) => k.ll);
+    if (ll.length > 1) L.polyline(ll, { color: "#d62728", weight: 3, dashArray: "6 6", interactive: false }).addTo(taso);
+    for (const p of ll) L.circleMarker(p, { radius: 6, color: "#d62728", fillOpacity: 1, interactive: false }).addTo(taso);
   }
 
-  piirto.lisaa = (ll, sijainti) => {
-    const k = piirto.karjet;
-    const p = kartta.latLngToContainerPoint(ll);
-    if (k.length >= 3 && p.distanceTo(kartta.latLngToContainerPoint(k[0].ll)) < 3) { piirto.valmis(true); return; }
-    if (k.length && p.distanceTo(kartta.latLngToContainerPoint(k[k.length - 1].ll)) < 3) return;  // tuplaklikkaus
-    k.push({ ll, sijainti });
-    piirra();
-  };
-
-  piirto.valmis = (suljettu = false) => {
-    if (piirto.karjet.length >= 2) {
-      tila.setTriggerValue("muokkaus", { tyyppi: "uusi_viiva", suljettu,
-                                         karjet: piirto.karjet.map((k) => k.sijainti) });
-    }
-    aseta(false);
-  };
-
-  kartta.on("click", (e) => { if (piirto.paalla) piirto.lisaa(...tila.piirtokohta(e.latlng)); });
-  kartta.on("dblclick", (e) => { if (piirto.paalla) { L.DomEvent.stop(e); piirto.valmis(); } });
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
-    if (piirto.paalla || tila.tyokalu) aseta(false); else tila.tyhjennaKulmat();
-  });
-}
-
-// Suorakulmio kartalta: kolmen pisteen tai kärjen tuplaklikkaus peräkkäin (saman uudelleen = valinta pois,
-// Esc tyhjentää). Kolmas valinta lähettää kulmat Pythonille (suorakulmion_neljas laskee neljännen).
-function luoKulmavalinta(L, tila) {
-  const taso = L.layerGroup().addTo(tila.kartta);
-  tila.kulmat = [];
-  const ohje = () => tila.piirto.div.querySelector(".slm-ohje");
-  function piirra() {
+  function piirraKulmat() {
     taso.clearLayers();
-    tila.kulmat.forEach((k, i) => L.marker(k.ll, { icon: L.divIcon({ className: "slm-kulma", iconSize: [16, 16],
-                                                                      html: String(i + 1) }), interactive: false })
+    tila.kulmat.forEach((k, i) => L.marker(k.ll, { icon: L.divIcon({ className: "slm-kulma", iconSize: [22, 22],
+                                                                    html: String(i + 1) }), interactive: false })
       .addTo(taso));
-    const o = ohje();
-    if (tila.piirto.paalla || tila.tyokalu) return;
-    o.style.display = tila.kulmat.length ? "" : "none";
-    o.textContent = tila.kulmat.length
-      ? `Suorakulmio: ${tila.kulmat.length}/3 kulmaa. Tuplaklikkaa seuraavaa kulmaa (sama uudelleen = pois, Esc = tyhjennä).`
-      : "";
+    ohje(tila.kulmat.length ? `Suorakulmio: ${tila.kulmat.length}/3 kulmaa valittu. Napauta seuraavaa `
+                              + "(saman napautus = pois)." : OHJEET.suorakulmio);
   }
-  tila.tyhjennaKulmat = () => { tila.kulmat = []; piirra(); };
-  tila.valitseKulma = (ll, sijainti) => {
-    if (tila.piirto.paalla || tila.tyokalu) return;
-    const avain = `${ll.lat.toFixed(7)},${ll.lng.toFixed(7)}`;
-    const i = tila.kulmat.findIndex((k) => k.avain === avain);
-    if (i >= 0) tila.kulmat.splice(i, 1); else tila.kulmat.push({ ll, sijainti, avain });
+
+  function valmis(suljettu = false) {
+    if (tila.piirto.length >= 2) {
+      laheta({ tyyppi: "uusi_viiva", suljettu, karjet: tila.piirto.map((k) => k.sijainti) });
+    }
+    aseta("siirra");
+  }
+
+  function poista(kohde) {
+    if (kohde.karki !== undefined) laheta({ tyyppi: "poista", viiva: kohde.v.nimi, karki: kohde.karki });
+    else laheta({ tyyppi: "poista_jana", viiva: kohde.v.nimi, jana: kohde.jana });
+    tila.valittu = null;
+    taso.clearLayers();
+    nappi("vahvista").style.display = "none";
+    ohje(OHJEET.poista);
+  }
+
+  // Suorakulmion kulma (työkalu tai hiiren tuplaklikkaus); kolmas lähettää kulmat Pythonille
+  function valitseKulma(ll) {
+    const k = tila.haku.lahin(ll);
+    if (!k) { ohje("Napauta mitattua pistettä tai viivan kärkeä."); return; }
+    const avain = `${k.ll.lat.toFixed(7)},${k.ll.lng.toFixed(7)}`;
+    const i = tila.kulmat.findIndex((c) => c.avain === avain);
+    if (i >= 0) tila.kulmat.splice(i, 1); else tila.kulmat.push({ ll: k.ll, sijainti: tila.haku.kohteenSijainti(k), avain });
     if (tila.kulmat.length === 3) {
-      const kulmat = tila.kulmat.map((k) => k.sijainti);
+      const kulmat = tila.kulmat.map((c) => c.sijainti);
       tila.kulmat = [];
-      piirra();
-      tila.setTriggerValue("muokkaus", { tyyppi: "suorakulmio", kulmat });
+      piirraKulmat();
+      laheta({ tyyppi: "suorakulmio", kulmat });
       return;
     }
-    piirra();
+    piirraKulmat();
+  }
+  tila.valitseKulma = valitseKulma;
+
+  tila.napautus = (ll) => {
+    const h = tila.haku;
+    const t = tila.tyokalu;
+    if (t === "siirra") {
+      const k = h.lahinKarki(ll);
+      const j = k ? null : h.lahinJana(ll);
+      if (k) {
+        const nimi = k.v.karjet[k.karki][2];
+        ohje(`${k.v.nimi}: kärki ${k.karki + 1}${nimi ? " (piste " + nimi + ")" : ""}. Raahaa siirtääksesi.`);
+      } else ohje(j ? `${j.v.nimi}: jana ${j.jana + 1}.` : OHJEET.siirra);
+    } else if (t === "lisaa") {
+      const j = h.lahinJana(ll);
+      if (!j) { ohje("Napauta lähempää viivaa."); return; }
+      laheta({ tyyppi: "lisaa", viiva: j.v.nimi, jalkeen: j.jana, ...h.sijainti(ll) });
+    } else if (t === "poista") {
+      const k = h.lahinKarki(ll);
+      const kohde = k || h.lahinJana(ll);
+      if (!kohde) { ohje("Napauta kärkeä tai janaa."); return; }
+      const sama = tila.valittu && tila.valittu.v.nimi === kohde.v.nimi && tila.valittu.karki === kohde.karki
+        && tila.valittu.jana === kohde.jana;
+      if (sama) { poista(kohde); return; }
+      tila.valittu = kohde;
+      taso.clearLayers();
+      const kk = kohde.v.karjet, n = kk.length;
+      if (k) {
+        L.circleMarker([kk[k.karki][0], kk[k.karki][1]], { radius: 14, color: "#d62728", weight: 3,
+                                                          fillOpacity: 0.25, interactive: false }).addTo(taso);
+        ohje(`Poistetaanko ${kohde.v.nimi}: kärki ${k.karki + 1}? Napauta uudelleen tai Poista valittu.`);
+      } else {
+        const a = kk[kohde.jana], b = kk[(kohde.jana + 1) %% n];
+        L.polyline([[a[0], a[1]], [b[0], b[1]]], { color: "#d62728", weight: 9, opacity: 0.6,
+                                                   interactive: false }).addTo(taso);
+        ohje(`Poistetaanko ${kohde.v.nimi}: jana ${kohde.jana + 1}? Napauta uudelleen tai Poista valittu.`);
+      }
+      nappi("vahvista").style.display = "";
+    } else if (t === "suorakulmio") {
+      valitseKulma(ll);
+    } else if (t === "piirra") {
+      const [nakyva, sijainti] = h.piirtokohta(ll);
+      const k = tila.piirto, p = kartta.latLngToContainerPoint(nakyva), r = h.sade();
+      if (k.length >= 3 && p.distanceTo(kartta.latLngToContainerPoint(k[0].ll)) < r) { valmis(true); return; }
+      if (k.length && p.distanceTo(kartta.latLngToContainerPoint(k[k.length - 1].ll)) < r) return;  // tuplanapautus
+      k.push({ ll: nakyva, sijainti });
+      piirraUusi();
+    } else if (t === "jatka" || t === "yhdista") {
+      const j = h.lahinJana(ll, true);
+      if (!j) { ohje("Napauta avointa viivaa sen pään läheltä."); return; }
+      const v = j.v;
+      const p = kartta.latLngToContainerPoint(ll);
+      const d = (k) => p.distanceTo(kartta.latLngToContainerPoint(L.latLng(k[0], k[1])));
+      const paa = d(v.karjet[0]) <= d(v.karjet[v.karjet.length - 1]) ? "alku" : "loppu";
+      if (t === "jatka") {
+        laheta({ tyyppi: "jatka", viiva: v.nimi, paa });
+        aseta("siirra");
+      } else if (!tila.yhdistettava) {
+        tila.yhdistettava = { viiva: v.nimi, paa };
+        const k = paa === "alku" ? v.karjet[0] : v.karjet[v.karjet.length - 1];
+        L.circleMarker([k[0], k[1]], { radius: 12, color: "#d62728", fillOpacity: 0.3, interactive: false }).addTo(taso);
+        ohje(`${v.nimi} (${paa}) valittu. Napauta toista viivaa.`);
+      } else {
+        laheta({ tyyppi: "leikkaus", viiva1: tila.yhdistettava.viiva, paa1: tila.yhdistettava.paa,
+                 viiva2: v.nimi, paa2: paa });
+        aseta("siirra");
+      }
+    }
   };
+
+  // Hiiren tuplaklikkaus: piirrossa Valmis, muuten suorakulmion kulma (kynällä työkalut)
+  tila.tupla = (ll) => {
+    if (tila.tyokalu === "piirra") valmis();
+    else if (tila.tyokalu === "siirra" && !tila.kyna) valitseKulma(ll);
+  };
+
+  kartta.on("click", (e) => tila.napautus(e.latlng));
+  kartta.on("dblclick", (e) => tila.tupla(e.latlng));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") aseta("siirra"); });
+  aseta("siirra");
 }
 
 export default async function (component) {
   const { data, parentElement, setTriggerValue } = component;
   const L = await lataaLeaflet();
 
-  // Kartta säilyy säiliössä uudelleenpiirroissa (näkymä ja taustakartan valinta pysyvät)
+  // Kartta säilyy säiliössä uudelleenpiirroissa (näkymä, taustakartta ja valittu työkalu pysyvät)
   let tila = parentElement.__slm;
   if (!tila) {
     const div = document.createElement("div");
     div.className = "slm-kartta";
     parentElement.appendChild(div);
-    const kartta = L.map(div, { maxZoom: 22, doubleClickZoom: false, zoomSnap: 0.5 });
+    // keyboard: false: kartta ei ota fokusta, joten selain ei vieritä sivua kesken napautuksen (kynällä
+    // napautus osui muuten ohi, kun kartan alareuna oli näytön alla)
+    const kartta = L.map(div, { maxZoom: 22, doubleClickZoom: false, zoomSnap: 0.5, keyboard: false });
     const taustat = {};
     for (const t of data.taustat) {
       const taso = t.wms
@@ -210,124 +279,159 @@ export default async function (component) {
       taustat[t.nimi] = taso;
       if (t.oletus) taso.addTo(kartta);
     }
-    L.control.layers(taustat, {}, { collapsed: true }).addTo(kartta);
+    L.control.layers(taustat, {}, { collapsed: true, position: "topright" }).addTo(kartta);
     L.control.scale({ imperial: false }).addTo(kartta);
     // Piilotettu välilehti tai suljettu osio muuttaa säiliön kokoa, jota Leaflet ei huomaa itse
     new ResizeObserver(() => kartta.invalidateSize()).observe(div);
     const ryhma = L.layerGroup().addTo(kartta);
-    tila = parentElement.__slm = { kartta, ryhma, rajattu: null };
-    luoPiirto(L, tila);
-    luoKulmavalinta(L, tila);
+    const vihje = document.createElement("div");
+    vihje.className = "slm-vihje";
+    kartta.getContainer().appendChild(vihje);
+    tila = parentElement.__slm = { kartta, ryhma, vihje, rajattu: null, kyna: false };
+    // Viimeisin syötetapa: kynällä ja sormella isompi napsahdussäde, eikä tuplaklikkaus tai pitkä painallus
+    // (Windows tekee siitä oikean klikkauksen) tee hiiren pikatoimintoja
+    div.addEventListener("pointerdown", (e) => { tila.kyna = e.pointerType !== "mouse"; }, true);
+    luoTyokalut(L, tila);
   }
   const { kartta, ryhma } = tila;
   ryhma.clearLayers();
   tila.setTriggerValue = setTriggerValue;
+  const laheta = (m) => setTriggerValue("muokkaus", m);
 
   const pisteet = data.pisteet;   // [lat, lon, nimi, koodi]
+  const muokattavat = data.viivat.filter((v) => !data.valittu || data.valittu === v.nimi);
   // Napsahduskohteet: mitatut pisteet ja kaikkien viivojen kärjet
   const kohteet = pisteet.map((p, i) => ({ ll: L.latLng(p[0], p[1]), piste: i }));
   data.viivat.forEach((v) => v.karjet.forEach((k, j) =>
     kohteet.push({ ll: L.latLng(k[0], k[1]), viiva: v.nimi, karki: j })));
 
+  const sade = () => (tila.kyna ? NAPSAHDUS_KYNA_PX : NAPSAHDUS_PX);
+  const px = (ll) => kartta.latLngToContainerPoint(ll);
+  const kpx = (k) => px(L.latLng(k[0], k[1]));
+
   function lahin(ll, ohita) {
-    const p = kartta.latLngToContainerPoint(ll);
-    let paras = null, etaisyys = NAPSAHDUS_PX;
+    const p = px(ll);
+    let paras = null, etaisyys = sade();
     for (const k of kohteet) {
       if (ohita && k.viiva === ohita.viiva && k.karki === ohita.karki) continue;
-      const d = p.distanceTo(kartta.latLngToContainerPoint(k.ll));
+      const d = p.distanceTo(px(k.ll));
       if (d < etaisyys) { etaisyys = d; paras = k; }
     }
     return paras;
   }
-
+  const kohteenSijainti = (k) => (k.piste !== undefined ? { piste: k.piste } : { kohde_viiva: k.viiva, kohde_karki: k.karki });
   function sijainti(ll, ohita) {
     const k = lahin(ll, ohita);
-    if (!k) return { lat: ll.lat, lon: ll.lng };
-    return k.piste !== undefined ? { piste: k.piste } : { kohde_viiva: k.viiva, kohde_karki: k.karki };
+    return k ? kohteenSijainti(k) : { lat: ll.lat, lon: ll.lng };
   }
-  // Piirtotilan klikkaus: [näytettävä sijainti, sijainti Pythonille]; napsahtaa lähimpään kohteeseen
-  tila.piirtokohta = (ll) => {
-    const k = lahin(ll);
-    return [k ? k.ll : ll, sijainti(ll)];
-  };
+  // Viivan v lähin jana (kärjestä i seuraavaan) ja etäisyys pikseleinä
+  function janaan(v, ll) {
+    const p = px(ll);
+    const n = v.karjet.length, janoja = v.suljettu ? n : n - 1;
+    let jana = 0, d = Infinity;
+    for (let i = 0; i < janoja; i++) {
+      const e = L.LineUtil.pointToSegmentDistance(p, kpx(v.karjet[i]), kpx(v.karjet[(i + 1) %% n]));
+      if (e < d) { d = e; jana = i; }
+    }
+    return { v, jana, d };
+  }
+  function lahinJana(ll, avoimet) {
+    let paras = null;
+    for (const v of muokattavat) {
+      if (v.karjet.length < 2 || (avoimet && v.suljettu)) continue;
+      const j = janaan(v, ll);
+      if (j.d < Math.max(sade(), 10) && (!paras || j.d < paras.d)) paras = j;
+    }
+    return paras;
+  }
+  function lahinKarki(ll) {
+    const p = px(ll);
+    let paras = null;
+    for (const v of muokattavat) v.karjet.forEach((k, j) => {
+      const d = p.distanceTo(kpx(k));
+      if (d < sade() && (!paras || d < paras.d)) paras = { v, karki: j, d };
+    });
+    return paras;
+  }
+  // Piirron napautus: [näytettävä sijainti, sijainti Pythonille]; napsahtaa lähimpään kohteeseen
+  const piirtokohta = (ll) => { const k = lahin(ll); return [k ? k.ll : ll, sijainti(ll)]; };
+  tila.haku = { lahin, sijainti, kohteenSijainti, lahinJana, lahinKarki, piirtokohta, sade };
 
-  pisteet.forEach((p, i) => {
+  // Pisteet eivät ota napautuksia itse: kartan napautus etsii lähimmän (isompi osuma-alue)
+  pisteet.forEach((p) => {
     const laskettu = p[3] === LASKETTU_KOODI;   // suorakulmaisella mittauksella laskettu piste
     L.circleMarker([p[0], p[1]], { radius: laskettu ? 5 : 4, color: laskettu ? "#d62728" : "#1f77b4", weight: 1,
-                                   fillOpacity: 0.9 })
+                                   fillOpacity: 0.9, interactive: false })
       .bindTooltip(String(p[2]), { permanent: true, direction: "right", className: "slm-nimi", offset: [4, 0] })
-      .on("click", (e) => {
-        if (!tila.piirto.paalla) return;
-        L.DomEvent.stop(e);
-        tila.piirto.lisaa(L.latLng(p[0], p[1]), { piste: i });
-      })
-      .on("dblclick", (e) => { L.DomEvent.stop(e); tila.valitseKulma(L.latLng(p[0], p[1]), { piste: i }); })
       .addTo(ryhma);
   });
 
   const kaikki = [];
+  tila.merkit = [];
   for (const v of data.viivat) {
-    const muokattava = !data.valittu || data.valittu === v.nimi;
+    const muokattava = muokattavat.includes(v);
     const viiva = L.polyline(v.piirto, { color: muokattava ? "#000" : "#888", weight: muokattava ? 3 : 2 })
       .bindTooltip(v.nimi).addTo(ryhma);
     v.piirto.forEach((q) => kaikki.push(q));
     if (!muokattava) continue;
-    // Klikatun kohdan jana (kärjestä i seuraavaan)
-    const lahinJana = (ll) => {
-      const p = kartta.latLngToContainerPoint(ll);
-      const n = v.karjet.length, janoja = v.suljettu ? n : n - 1;
-      let paras = 0, pienin = Infinity;
-      for (let i = 0; i < janoja; i++) {
-        const a = kartta.latLngToContainerPoint(L.latLng(v.karjet[i][0], v.karjet[i][1]));
-        const b = kartta.latLngToContainerPoint(L.latLng(v.karjet[(i + 1) %% n][0], v.karjet[(i + 1) %% n][1]));
-        const d = L.LineUtil.pointToSegmentDistance(p, a, b);
-        if (d < pienin) { pienin = d; paras = i; }
-      }
-      return paras;
-    };
-    // Klikkaus viivalle: uusi kärki; oikea klikkaus: jana pois
+    // Hiirellä viivan klikkaus = uusi kärki ja oikea klikkaus = jana pois (kuten ennen); muuten työkalu
     viiva.on("click", (e) => {
-      L.DomEvent.stopPropagation(e);
-      if (tila.piirto.paalla) { tila.piirto.lisaa(...tila.piirtokohta(e.latlng)); return; }
-      if (tila.tyokalu) { tila.tyokaluKlikkaus(v, e.latlng); return; }
-      setTriggerValue("muokkaus", { tyyppi: "lisaa", viiva: v.nimi, jalkeen: lahinJana(e.latlng), ...sijainti(e.latlng) });
+      L.DomEvent.stop(e);
+      if (tila.tyokalu === "siirra" && !tila.kyna) {
+        laheta({ tyyppi: "lisaa", viiva: v.nimi, jalkeen: janaan(v, e.latlng).jana, ...sijainti(e.latlng) });
+        return;
+      }
+      tila.napautus(e.latlng);
     });
     viiva.on("contextmenu", (e) => {
       L.DomEvent.stop(e);
-      if (tila.piirto.paalla) return;
-      setTriggerValue("muokkaus", { tyyppi: "poista_jana", viiva: v.nimi, jana: lahinJana(e.latlng) });
+      if (tila.kyna || tila.tyokalu === "piirra") return;
+      laheta({ tyyppi: "poista_jana", viiva: v.nimi, jana: janaan(v, e.latlng).jana });
     });
     v.karjet.forEach((k, j) => {
       const luokka = "slm-karki" + (k[3] === "laskettu" ? " laskettu" : k[3] === "käsin" ? " kasin" : "");
-      const ikoni = L.divIcon({ className: luokka, iconSize: [12, 12] });
-      const m = L.marker([k[0], k[1]], { draggable: true, icon: ikoni, autoPan: true })
-        .bindTooltip(`${v.nimi}: ${k[2]}`, { direction: "top", offset: [0, -6] }).addTo(ryhma);
+      // Kahva 28 px (näkyvä kärki 12 px keskellä): kynällä raahaus alkaa, vaikka ei osu aivan kärkeen
+      const ikoni = L.divIcon({ className: "slm-kahva", iconSize: [28, 28], html: `<div class="${luokka}"></div>` });
+      const ll = L.latLng(k[0], k[1]);
+      const m = L.marker(ll, { draggable: true, icon: ikoni, autoPan: true, keyboard: false })
+        .bindTooltip(`${v.nimi}: ${k[2]}`, { direction: "top", offset: [0, -10] }).addTo(ryhma);
+      const merkki = () => m.getElement().firstChild;
+      // Kynällä ja sormella Leaflet aloittaa kärjen raahauksen lisäksi kartan panoroinnin, jolloin kärki
+      // karkaa kynän alta: kartan raahaus pois, kunnes kynä nousee
+      // (elementti on olemassa vasta, kun kartalla on näkymä: ensimmäisellä kerralla rajauksen jälkeen)
+      const kahva = () => m.getElement().addEventListener("pointerdown", () => {
+        if (tila.tyokalu !== "siirra") return;
+        kartta.dragging.disable();
+        document.addEventListener("pointerup", () => kartta.dragging.enable(), { once: true });
+      });
+      if (m.getElement()) kahva(); else m.once("add", kahva);
+      m.on("dragstart", () => m.closeTooltip());
       m.on("drag", (e) => {
         const kohde = lahin(e.latlng, { viiva: v.nimi, karki: j });
-        m.getElement().classList.toggle("napsahtaa", !!kohde);
+        merkki().classList.toggle("napsahtaa", !!kohde);
+        // Napsahduskohde näkyy kynän yläpuolella (kärki itse jää kynän alle)
+        const p = px(e.latlng);
+        tila.vihje.style.display = kohde ? "block" : "none";
+        if (kohde) {
+          tila.vihje.textContent = kohde.piste !== undefined ? `→ ${pisteet[kohde.piste][2]}`
+            : `→ ${kohde.viiva}: kärki ${kohde.karki + 1}`;
+          tila.vihje.style.left = `${p.x}px`;
+          tila.vihje.style.top = `${p.y - 30}px`;
+        }
       });
       m.on("dragend", () => {
-        const ll = m.getLatLng();
-        setTriggerValue("muokkaus", { tyyppi: "siirra", viiva: v.nimi, karki: j,
-                                      ...sijainti(ll, { viiva: v.nimi, karki: j }) });
+        tila.vihje.style.display = "none";
+        laheta({ tyyppi: "siirra", viiva: v.nimi, karki: j, ...sijainti(m.getLatLng(), { viiva: v.nimi, karki: j }) });
       });
-      m.on("dblclick", (e) => {
-        L.DomEvent.stop(e);
-        if (tila.piirto.paalla) { tila.piirto.valmis(); return; }
-        tila.valitseKulma(L.latLng(k[0], k[1]), { kohde_viiva: v.nimi, kohde_karki: j });
-      });
+      m.on("click", (e) => { L.DomEvent.stop(e); tila.napautus(ll); });
+      m.on("dblclick", (e) => { L.DomEvent.stop(e); tila.tupla(ll); });
       m.on("contextmenu", (e) => {
         L.DomEvent.stop(e);
-        if (tila.piirto.paalla) return;
-        setTriggerValue("muokkaus", { tyyppi: "poista", viiva: v.nimi, karki: j });
+        if (tila.kyna || tila.tyokalu === "piirra") return;
+        laheta({ tyyppi: "poista", viiva: v.nimi, karki: j });
       });
-      m.on("click", (e) => {
-        if (tila.tyokalu) { L.DomEvent.stop(e); tila.tyokaluKlikkaus(v, L.latLng(k[0], k[1])); return; }
-        if (!tila.piirto.paalla) return;
-        L.DomEvent.stop(e);
-        tila.piirto.lisaa(L.latLng(k[0], k[1]), { kohde_viiva: v.nimi, kohde_karki: j });
-      });
-      if (tila.piirto.paalla || tila.tyokalu) m.dragging.disable();
+      if (tila.tyokalu !== "siirra") m.dragging.disable();
+      tila.merkit.push(m);
     });
   }
   // Rajaus aluksi ja kun valittu viiva vaihtuu; muuten näkymä säilyy
@@ -339,7 +443,8 @@ export default async function (component) {
   }
   setTimeout(() => kartta.invalidateSize(), 0);
 }
-""" % {"leaflet": LEAFLET, "napsahdus": NAPSAHDUS_PX, "laskettu": sl.LASKETTU_KOODI}
+""" % {"leaflet": LEAFLET, "napsahdus": NAPSAHDUS_PX, "napsahdus_kyna": NAPSAHDUS_KYNA_PX,
+       "laskettu": sl.LASKETTU_KOODI}
 
 _KOMPONENTIT = {}
 
@@ -394,7 +499,7 @@ def nayta(tulos, kohteet, api_key=None, helsinki=False, valittu=None, key="seina
         "valittu": valittu,
         "taustat": _taustat(api_key, helsinki),
     }
-    tulos_k = _komponentti()(key=key, data=data, height=625, on_muokkaus_change=lambda: None)
+    tulos_k = _komponentti()(key=key, data=data, height="content", on_muokkaus_change=lambda: None)
     return tulos_k.get("muokkaus") if tulos_k else None
 
 

@@ -381,6 +381,7 @@ pytest tests/
 - `tests/synteettiset.py`: talogeneraattori (suorakulmio, L, T, parveke, syvennys, vino, kaareva erkkeri, pyöristetty kulma, U, Z, H, porras, kaksi syvennystä). Se simuloi maastomittauksen koodeineen, piilokulmineen ja 3 mm mittausvirheineen. `test_seinalinja_synteettinen.py` vertaa muodostettua seinälinjaa oikeaan muotoon. 3 mm pistevirheellä koko viivan suurin poikkeama on mediaanina 6–8 mm.
 - `test_kanta.py`: kantafunktiot väliaikaisessa PostGIS-kannassa, joka luodaan ja poistetaan ajon aikana. Testit ohitetaan, jos PostgreSQL:ää tai PostGIS:iä ei ole. Yhteys muodostetaan `PG*`-ympäristömuuttujilla, ja oletuskäyttäjä on kirjautunut käyttäjä. GPKG-tuonnin testi vaatii lisäksi `ogr2ogr`:n.
 - `test_app.py`: sovelluksen savutestit (Streamlit AppTest): kirjautuminen, kiinteistöhaku, omien kiintopisteiden tuonti ja JobXML-osio oikeilla tiedostoilla. Verkko- ja kantakutsut korvataan mockeilla.
+- `test_selain_muokkain.py`: seinälinjan muokkauskartan selaintesti (Playwright + Chrome, merkintä `selain`). Kynä (maastotabletti, esim. Trimble TSC7) emuloidaan Chromen DevTools-protokollalla: raahaus ja napsahdus, Lisää kärki, Poista vahvistuksella, Suorakulmio, Uusi viiva ja hiiren pikatoiminnot. Ohitetaan, jos Playwrightia tai Chromea ei ole (`pip install playwright`); kartta lataa Leafletin verkosta.
 
 ## Lisenssi
 

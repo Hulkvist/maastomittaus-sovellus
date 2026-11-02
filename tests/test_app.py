@@ -167,11 +167,72 @@ def test_jobxml_osio_oikeilla_tiedostoilla(nimi, monkeypatch):
     assert not virheet(at), virheet(at)
     assert any("jäsennetty" in s.value for s in at.success)
     assert at.session_state["jobxml_tunnus"] == "09102509510003"
-    seinalinja = any(e.label.startswith("Seinälinja") for e in at.expander)
-    assert seinalinja == (nimi in ("testi2.jxl", "lepolantie79.jxl", "osuuskunnantie60.jxl"))
+    automaattinen = any(e.label.startswith("Seinälinja (koodit") for e in at.expander)
+    assert automaattinen == (nimi in ("testi2.jxl", "lepolantie79.jxl", "osuuskunnantie60.jxl"))
+    # ilman seinälinjakoodeja viivan voi piirtää käsin
+    assert any(e.label == "Seinälinja (piirrä käsin)" for e in at.expander) == (not automaattinen)
     assert any(b.label.startswith("Lataa pisteet (krd") for b in at.get("download_button"))
     assert any(b.label == "Lataa mittausraportti (PDF)" for b in at.get("download_button"))
     assert not any(b.label == "Luo PDF-raportti" for b in at.button)
+
+
+def _tyo_ilman_seinalinjakoodeja():
+    """Synteettinen JobXML: kolme RTK-pistettä ilman seinälinjakoodeja (8 / 5 / 100)."""
+    pisteet = "".join(
+        f'<PointRecord ID="{i:08x}" TimeStamp="2026-10-01T10:00:{i:02d}"><Name>{i}</Name><Code>RAK</Code>'
+        f'<Method>GpsStaticObservation</Method><Classification>Normal</Classification><Deleted>false</Deleted>'
+        f'<ComputedGrid><North>{N0 + dn}</North><East>{E0 + de}</East><Elevation>10</Elevation></ComputedGrid>'
+        '</PointRecord>' for i, (de, dn) in enumerate([(0, 0), (12, 0), (12, 8)], start=1))
+    xml = ('<?xml version="1.0"?><JOBFile jobName="kasin" product="x" TimeStamp="2026-10-01T10:00:00">'
+           f"<FieldBook>{pisteet}</FieldBook></JOBFile>")
+    return Ladattu("kasin.jxl", xml.encode())
+
+
+def test_seinalinja_kasin_ilman_koodeja_ja_kaikki_janat_pois(monkeypatch):
+    """Ilman seinälinjakoodeja viivan voi piirtää kartalla; kun kaikki janat poistetaan, osio ei kaadu
+    (Poista jana -lomake ilman viivoja) ja tallennukseen ei mene viivoja."""
+    import hashlib
+
+    import jobxml_tuonti as jx
+
+    viivat = mock.Mock(return_value=1)
+    for nimi in ("tallenna_mittaukset_kantaan", "tallenna_raportti_kantaan"):
+        monkeypatch.setattr(jx, nimi, mock.Mock(return_value=1))
+    monkeypatch.setattr(jx, "tallenna_seinalinjat_kantaan", viivat)
+    monkeypatch.setattr(jx, "tiedoston_muut_kiinteistot", mock.Mock(return_value=[]))
+    monkeypatch.setattr(hk, "tunnista_kiinteisto_pisteparvesta", mock.Mock(return_value=("09102509510003", {}, 3)))
+    tiedosto = _tyo_ilman_seinalinjakoodeja()
+    at = sovellus()
+    with ladattu_tiedosto("jobxml_tiedosto", tiedosto):
+        at.run()
+        assert not virheet(at), virheet(at)
+        assert any(e.label == "Seinälinja (piirrä käsin)" for e in at.expander)
+        assert [t for t in at.toggle if t.label == "Muokkaa viivaa kartalla"][0].value   # muokkain auki
+        assert any(c.value == "Viivoja ei ole." for c in at.caption)
+        # kartalla piirretty viiva pisteiden 1 -> 2 -> 3 kautta (kuten seinalinjan_muokkain lähettää)
+        avain = "_sl_muokkaukset_" + hashlib.sha1(tiedosto.getvalue()).hexdigest()
+        tila = at.session_state[avain]
+        karjet = [{"e": E0 + de, "n": N0 + dn, "z": 10.0, "nimi": str(i), "laji": "mitattu"}
+                  for i, (de, dn) in enumerate([(0, 0), (12, 0), (12, 8)], start=1)]
+        tila["muokkaukset"].append({"tyyppi": "uusi_viiva", "nimi": "Uusi viiva 1", "suljettu": False,
+                                    "pohja": None, "karjet": karjet})
+        at.session_state[avain] = tila
+        at.run()
+        assert not virheet(at), virheet(at)
+        assert any(b.label == "Lataa seinälinja (DXF) (muokattu)" for b in at.get("download_button"))
+        [b for b in at.button if b.label == "Tallenna mittaukset kantaan"][0].click().run()
+        tallennettu = viivat.call_args[0][1]
+        assert [v["nimi"] for v in tallennettu["viivat"]] == ["Uusi viiva 1"]
+        # molemmat janat pois -> ei viivoja, osio toimii edelleen
+        for _ in range(2):
+            [b for b in at.button if b.label == "Poista jana"][0].click().run()
+            assert not virheet(at), virheet(at)
+        assert any(c.value == "Viivoja ei ole." for c in at.caption)
+        assert any(b.label == "Lisää piste" for b in at.button)        # suorakulmainen mittaus toimii
+        viivat.reset_mock()
+        [b for b in at.button if b.label == "Tallenna mittaukset kantaan"][0].click().run()
+    assert not virheet(at), virheet(at)
+    viivat.assert_not_called()
 
 
 def _testi2(monkeypatch):
