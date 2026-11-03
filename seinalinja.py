@@ -58,6 +58,8 @@ KOODI_LINJA = 100
 KOODI_KAARI = 4
 SEINALINJAKOODIT = {KOODI_ALKU_LOPPU, KOODI_KULMA, KOODI_LINJA, KOODI_KAARI}
 
+KULMA_45_KERROIN = 2.0        # 45°:n kulman poikkeaman paino seinäjaossa (ks. _kulman_hinta)
+KULMA_45_LISA_ASTE = 10.0     # 45°:n kulman lisähinta seinäjaossa
 LINJA_TOLERANSSI_M = 0.05     # pisteen suurin etäisyys suorasta, jotta se on "samalla linjalla"
 YHDENSUUNTAISUUS_RAJA_ASTE = 5.0
 MAX_JATKE_M = 20.0            # laskettu kulma kauempana lähimmästä pisteestä -> varoitus
@@ -1192,6 +1194,14 @@ def _suuntien_poikkeama(d1, d2):
     return _poikkeama_suorasta_kulmasta(math.atan2(d1[1], d1[0]), math.atan2(d2[1], d2[0]))
 
 
+def _kulman_hinta(d1, d2):
+    """Seinäjaon kulman hinta: poikkeama suorasta kulmasta, tai 45°:n viisteestä (viistetty nurkka, erkkeri)
+    KULMA_45_KERROIN-kertaisena + KULMA_45_LISA_ASTE. Suora kulma voittaa epäselvässä jaossa, mutta tarkasti
+    mitatut viisteet eivät häviä jaolle, joka välttää 45° kulmat vinoilla seinillä (poro.jxl: RAK Eriste)."""
+    ero = math.degrees(abs(math.atan2(d1[1], d1[0]) - math.atan2(d2[1], d2[0]))) % 45.0
+    return min(_suuntien_poikkeama(d1, d2), KULMA_45_KERROIN * min(ero, 45.0 - ero) + KULMA_45_LISA_ASTE)
+
+
 def _seinapatkalla(pisteet, alku, loppu, suora):
     """Ovatko pisteet seinäpätkällä alku-loppu (kulmapisteet). Avoimessa päässä
     (None) riittää, etteivät pisteet ole toisen pään kulman takana."""
@@ -1507,12 +1517,12 @@ def _arvioi_jako(pts, ryhmat, alku_kiintea, loppu_kiintea, edellinen_xy, seuraav
     # kulma vain sattuu olemaan lähempänä suoraa, voittaisi mitatun vinon kulman)
     mitattu = ({0} if lidar_poikkeamat and yksin_alku else set()) | \
         ({len(suunnat) - 2} if lidar_poikkeamat and yksin_loppu else set())
-    pisteet = sum(_suuntien_poikkeama(d1, d2) for i, (d1, d2) in enumerate(zip(suunnat, suunnat[1:]))
+    pisteet = sum(_kulman_hinta(d1, d2) for i, (d1, d2) in enumerate(zip(suunnat, suunnat[1:]))
                   if i not in mitattu)
     if edellinen_xy is not None and alku_kiintea and edellinen_xy != pts[0]:
-        pisteet += _suuntien_poikkeama(_suora_kahdesta(edellinen_xy, pts[0])[1], suunnat[0])
+        pisteet += _kulman_hinta(_suora_kahdesta(edellinen_xy, pts[0])[1], suunnat[0])
     if seuraava_xy is not None and loppu_kiintea and seuraava_xy != pts[-1]:
-        pisteet += _suuntien_poikkeama(suunnat[-1], _suora_kahdesta(pts[-1], seuraava_xy)[1])
+        pisteet += _kulman_hinta(suunnat[-1], _suora_kahdesta(pts[-1], seuraava_xy)[1])
     pisteet += 5.0 * oletus_90 + 0.5 * len(kulmat)
     if lidar:
         # LiDARin kanssa ristiriitainen seinä (esim. kulmapiste ja toisen seinän piste samalla
