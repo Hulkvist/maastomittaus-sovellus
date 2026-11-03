@@ -336,3 +336,21 @@ def test_paikallinen_esikatselu_vastaa_pythonia(sivu):
             return tila.paikallisesti(d, m, "Uusi viiva 1") ? d.viivat : null; }""", [data, t])
         assert selain is not None, t
         assert vertailtava(selain) == odotettu, t
+
+
+def test_lahekkaiset_pisteet_erottuvat_lahella(sivu):
+    """Kartan voi zoomata tasolle 25: 8 cm:n päässä toisistaan olevista pisteistä kynä valitsee sen, jota kohti
+    napautetaan (tasolla 22 molemmat olisivat kynän napsahdussäteellä)."""
+    lat, lon = hk._latlon_muunnin()(sov.E0 + 23, sov.N0 + 4)        # P9; kärki 2 on 3 m päässä
+    sivu.evaluate("([lat, lon]) => { const k = document.querySelector('.slm-kartta').parentElement.__slm.kartta;"
+                  " k.setView([lat, lon], 25, { animate: false }); }", [lat, lon])
+    sivu.wait_for_timeout(300)
+    assert sivu.evaluate("document.querySelector('.slm-kartta').parentElement.__slm.kartta.getZoom()") == 25
+    valinta = sivu.evaluate("""([lat, lon]) => {
+        const t = document.querySelector('.slm-kartta').parentElement.__slm, k = t.kartta;
+        t.kyna = true;
+        const p = k.latLngToContainerPoint([lat, lon]);
+        const lahin = (dx) => { const x = t.haku.lahin(k.containerPointToLatLng([p.x + dx, p.y])); return x && x.nimi; };
+        const mpx = 1 / (k.containerPointToLatLng([p.x + 1, p.y]).distanceTo(k.containerPointToLatLng(p)));
+        return [lahin(0), lahin(0.08 * mpx), Math.round(0.08 * mpx)]; }""", [lat, lon])
+    assert valinta[0] == "P9" and valinta[1] is None and valinta[2] > 24, valinta

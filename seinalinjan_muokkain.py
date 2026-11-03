@@ -29,6 +29,8 @@ import seinalinja as sl
 LEAFLET = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist"
 NAPSAHDUS_PX = 12        # hiirellä kärki napsahtaa pisteeseen tätä lähempänä (näytön pikseleinä)
 NAPSAHDUS_KYNA_PX = 24   # kynällä ja sormella (kärki jää kynän alle, napautus osuu epätarkemmin)
+MAX_ZOOM = 25             # lähekkäiset pisteet erottuvat (zoom 25: kynän napsahdussäde ~6 cm Helsingissä)
+ALOITUS_MAX_ZOOM = 21     # aloitusnäkymä ei mene pienellä työllä liian lähelle
 NIMIA_NAKYVISSA_MAX = 150  # pisteiden nimet näytetään, kun näkyvissä on enintään näin monta pistettä
 
 _CSS = """
@@ -78,6 +80,7 @@ const NAPSAHDUS_PX = %(napsahdus)d;
 const NAPSAHDUS_KYNA_PX = %(napsahdus_kyna)d;
 const LASKETTU_KOODI = "%(laskettu)s";
 const NIMIA_NAKYVISSA_MAX = %(nimia_max)d;
+const MAX_ZOOM = %(max_zoom)d, ALOITUS_MAX_ZOOM = %(aloitus_max_zoom)d;
 
 async function lataaLeaflet() {
   if (!document.getElementById("slm-leaflet-css")) {
@@ -520,13 +523,15 @@ export default async function (component) {
     parentElement.appendChild(div);
     // keyboard: false: kartta ei ota fokusta, joten selain ei vieritä sivua kesken napautuksen (kynällä
     // napautus osui muuten ohi, kun kartan alareuna oli näytön alla)
-    const kartta = L.map(div, { maxZoom: 22, doubleClickZoom: false, zoomSnap: 0.5, keyboard: false });
+    const kartta = L.map(div, { maxZoom: MAX_ZOOM, doubleClickZoom: false, zoomSnap: 0.5, keyboard: false });
     const taustat = {};
     for (const t of data.taustat) {
       const taso = t.wms
-        ? L.tileLayer.wms(t.url, { layers: t.wms, format: "image/png", version: "1.3.0", maxZoom: 22,
+        // taustakartta suurennetaan viimeisillä tasoilla (ei omia kuvia niin lähelle)
+        ? L.tileLayer.wms(t.url, { layers: t.wms, format: "image/png", version: "1.3.0", maxZoom: MAX_ZOOM,
+                                   maxNativeZoom: 22,
                                    attribution: t.attr })
-        : L.tileLayer(t.url, { maxZoom: 22, maxNativeZoom: t.maxNative || 19, attribution: t.attr });
+        : L.tileLayer(t.url, { maxZoom: MAX_ZOOM, maxNativeZoom: t.maxNative || 19, attribution: t.attr });
       taustat[t.nimi] = taso;
       if (t.oletus) taso.addTo(kartta);
     }
@@ -740,14 +745,15 @@ function piirraKartta(L, tila, data) {
   const rajaus = data.valittu || "*";
   if (tila.rajattu !== rajaus && (kaikki.length || pisteet.length)) {
     const alue = kaikki.length ? kaikki : pisteet.map((p) => [p[0], p[1]]);
-    kartta.fitBounds(L.latLngBounds(alue).pad(0.15));
+    kartta.fitBounds(L.latLngBounds(alue).pad(0.15), { maxZoom: ALOITUS_MAX_ZOOM });
     tila.rajattu = rajaus;
   }
   tila.nimet();
   setTimeout(() => kartta.invalidateSize(), 0);
 }
 """ % {"leaflet": LEAFLET, "napsahdus": NAPSAHDUS_PX, "napsahdus_kyna": NAPSAHDUS_KYNA_PX,
-       "laskettu": sl.LASKETTU_KOODI, "nimia_max": NIMIA_NAKYVISSA_MAX}
+       "laskettu": sl.LASKETTU_KOODI, "nimia_max": NIMIA_NAKYVISSA_MAX,
+       "max_zoom": MAX_ZOOM, "aloitus_max_zoom": ALOITUS_MAX_ZOOM}
 
 _KOMPONENTIT = {}
 
