@@ -189,6 +189,33 @@ def test_uusi_viiva_valmis_napista(sivu):
     assert t["karjet"][1] == {"piste": 4} and "lat" in t["karjet"][2]
 
 
+def test_uusi_viiva_osoitin_nayttaa_napsahduksen(sivu):
+    """Piirrossa hiiren (tai leijuvan kynän) alla oleva napsahduskohde näkyy ennen napautusta: vihreä rengas,
+    kohteen nimi ja käsiosoitin, myös pelkässä pisteessä (P9 ei ole viivan kärki). Apuviiva edellisestä."""
+    kyna = Kyna(sivu)
+    nappi(sivu, kyna, "piirra")
+    x, y = kohta(sivu, 23, 4)
+    sivu.mouse.move(x + 8, y - 5)
+    sivu.wait_for_timeout(200)
+    vihje = sivu.locator(".slm-vihje")
+    assert vihje.is_visible() and vihje.inner_text() == "P9"
+    assert "slm-osuu" in sivu.locator(".slm-kartta").get_attribute("class")
+    assert sivu.evaluate("getComputedStyle(document.querySelector('.slm-kartta')).cursor") == "pointer"
+    x0, y0 = kohta(sivu, 10, 5)
+    sivu.mouse.move(x0, y0)                       # tyhjä kohta: ei renkaata
+    sivu.wait_for_timeout(200)
+    assert not vihje.is_visible()
+    assert "slm-osuu" not in sivu.locator(".slm-kartta").get_attribute("class")
+    sivu.mouse.click(x, y)                        # ensimmäinen kärki P9:ään
+    sivu.mouse.move(x0, y0)
+    sivu.wait_for_timeout(200)
+    apuviivoja = sivu.evaluate("""() => {
+        const t = document.querySelector('.slm-kartta').parentElement.__slm;
+        let n = 0; t.kartta.eachLayer((l) => { if (l.options && l.options.dashArray === "4 6") n++; });
+        return n; }""")
+    assert apuviivoja == 1
+
+
 def test_hiiren_pikatoiminnot_toimivat(sivu):
     x, y = kohta(sivu, 20, 10)
     sivu.mouse.click(x, y, button="right")
@@ -263,3 +290,49 @@ def test_kartta_ei_hypi_tyokalua_vaihdettaessa(sivu):
         x, y = kohta(sivu, de, dn)
         kyna.napauta(x, y)
     assert sivu.locator(".slm-sivu").is_visible() and ylareuna() == alku
+
+
+def test_paikallinen_esikatselu_vastaa_pythonia(sivu):
+    """Kartta näyttää yksinkertaiset muokkaukset heti itse: tuloksen pitää olla sama kuin Pythonin
+    (muokkaukseksi + seinalinja.sovella_muokkaukset), jonka palvelin lopulta lähettää."""
+    import seinalinja as sl
+    import seinalinjan_muokkain as slm
+
+    def viiva(nimi, xy, suljettu):
+        return {"nimi": nimi, "suljettu": suljettu, "numero": None, "avain": ("", (), 1),
+                "karjet": [{"e": sov.E0 + x, "n": sov.N0 + y, "z": None, "nimi": f"{nimi}{i}", "laji": "mitattu",
+                            "bulge": 0.0} for i, (x, y) in enumerate(xy)]}
+    tulos = {"viivat": [viiva("A", [(0, 0), (20, 0), (20, 10), (0, 10)], False),
+                        viiva("B", [(30, 0), (40, 0), (40, 8), (30, 8)], True)], "varoitukset": []}
+    kohteet = [("P1", "RAK 5", sov.E0 + 23, sov.N0 + 4, None), ("P2", "RAK 5", sov.E0 + 5, sov.N0 + 5, None)]
+    lat, lon = hk._latlon_muunnin()(sov.E0 + 10, sov.N0 + 12)
+    tapahtumat = [
+        {"tyyppi": "siirra", "viiva": "A", "karki": 1, "piste": 0},
+        {"tyyppi": "siirra", "viiva": "B", "karki": 0, "kohde_viiva": "A", "kohde_karki": 3},
+        {"tyyppi": "siirra", "viiva": "A", "karki": 2, "lat": lat, "lon": lon},
+        {"tyyppi": "lisaa", "viiva": "A", "jalkeen": 0, "piste": 1},
+        {"tyyppi": "lisaa", "viiva": "B", "jalkeen": 3, "lat": lat, "lon": lon},
+        {"tyyppi": "poista", "viiva": "A", "karki": 2},
+        {"tyyppi": "poista", "viiva": "B", "karki": 0},
+        {"tyyppi": "poista_jana", "viiva": "A", "jana": 1},
+        {"tyyppi": "poista_jana", "viiva": "A", "jana": 0},
+        {"tyyppi": "poista_jana", "viiva": "A", "jana": 2},
+        {"tyyppi": "poista_jana", "viiva": "B", "jana": 2},
+        {"tyyppi": "uusi_viiva", "suljettu": True, "karjet": [{"piste": 0}, {"kohde_viiva": "B", "kohde_karki": 1},
+                                                              {"lat": lat, "lon": lon}]},
+        {"tyyppi": "uusi_viiva", "suljettu": False, "karjet": [{"piste": 1}, {"piste": 0}]},
+    ]
+    data = slm.kartan_data(tulos, kohteet)
+
+    def vertailtava(viivat):
+        return [(v["nimi"], v["suljettu"], [(round(k[0], 7), round(k[1], 7), k[2], k[3]) for k in v["karjet"]])
+                for v in viivat]
+
+    for t in tapahtumat:
+        m = slm.muokkaukseksi(t, tulos, kohteet, uuden_nimi="Uusi viiva 1")
+        odotettu = vertailtava(slm.kartan_data(sl.sovella_muokkaukset(tulos, [m]), kohteet)["viivat"])
+        selain = sivu.evaluate("""([d, m]) => {
+            const tila = document.querySelector('.slm-kartta').parentElement.__slm;
+            return tila.paikallisesti(d, m, "Uusi viiva 1") ? d.viivat : null; }""", [data, t])
+        assert selain is not None, t
+        assert vertailtava(selain) == odotettu, t

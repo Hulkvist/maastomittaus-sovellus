@@ -558,6 +558,19 @@ def _seinalinjan_lidar():
     return valimuisti[avain]
 
 
+def _automaattinen_seinalinja(raaka_bytes, pisteet, tapa, kantakartta, lidar, lidar_paatelty, nakyvyys):
+    """jx.muodosta_seinalinja istunnon välimuistista: sama tiedosto samoilla valinnoilla lasketaan kerran, joten
+    muut uudelleenajot eivät laske automaattista viivaa uudelleen (isolla työllä se vie sekunteja)."""
+    avain = hashlib.sha1(raaka_bytes + repr((tapa, kantakartta, lidar, lidar_paatelty, nakyvyys)).encode()).hexdigest()
+    muisti = st.session_state.setdefault("_seinalinja_valimuisti", {})
+    if avain not in muisti:
+        if len(muisti) >= 4:
+            muisti.pop(next(iter(muisti)))
+        muisti[avain] = jx.muodosta_seinalinja(pisteet, tapa=tapa, kantakartta=kantakartta, lidar=lidar,
+                                                lidar_paatelty=lidar_paatelty, nakyvyys=nakyvyys)
+    return copy.deepcopy(muisti[avain])
+
+
 def _seinalinjan_valmistelu(kaikki_pisteet, raaka_bytes, kasin=False):
     """Seinälinja kerran ajoa kohden sekä kokonaiskarttaan että Seinälinja-osioon, jotta viivat ovat samat.
     Osion valinnat (järjestys, kantakartta, LiDAR-DXF) luetaan session_statesta, koska kokonaiskartta
@@ -585,11 +598,9 @@ def _seinalinjan_valmistelu(kaikki_pisteet, raaka_bytes, kasin=False):
     s["lidar_seinat"] = s["lidar"]["SEINA"] if s["lidar"] and s["lidar"]["SEINA"] else None
     s["lidar_paatelty"] = s["lidar"].get("PAATELTY") if s["lidar"] else None   # vain järjestyksen apuna
     try:
-        tulos = jx.muodosta_seinalinja(
-            kaikki_pisteet, tapa=SEINALINJAN_JARJESTYS.get(st.session_state.get("seinalinja_tapa"), "lyhin"),
-            kantakartta=s["kantakartta"], lidar=s["lidar_seinat"], lidar_paatelty=s["lidar_paatelty"],
-            nakyvyys=s["nakyvyys"],
-        )
+        tulos = _automaattinen_seinalinja(
+            raaka_bytes, kaikki_pisteet, SEINALINJAN_JARJESTYS.get(st.session_state.get("seinalinja_tapa"), "lyhin"),
+            s["kantakartta"], s["lidar_seinat"], s["lidar_paatelty"], s["nakyvyys"])
         s["tila"] = tila = _seinalinjan_muokkaukset(raaka_bytes)
         pohja = sl.viivojen_tunniste(tulos)
         if not tila["muokkaukset"] or not tila.get("pohja_tulos"):
@@ -599,6 +610,15 @@ def _seinalinjan_valmistelu(kaikki_pisteet, raaka_bytes, kasin=False):
     except Exception as e:
         s["virhe"] = e
     return s
+
+
+def _aja_osa_uudelleen():
+    """Muokkauksen jälkeen vain seinälinjan osa (fragmentti) uudelleen; koko sivu, jos muokkaus tuli koko sivun
+    ajossa (fragmentin rajausta voi käyttää vain fragmentin omassa ajossa)."""
+    try:
+        st.rerun(scope="fragment")
+    except st.errors.StreamlitAPIException:
+        st.rerun()
 
 
 def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
@@ -614,32 +634,42 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
                "viivan klikkaus = uusi kärki, oikea klikkaus = poista, tuplaklikkaus = suorakulmion kulma, Esc = "
                "peruuta. Punainen kärki = laskettu kulma, oranssi = käsin siirretty, punainen piste = "
                "suorakulmaisella mittauksella laskettu piste. Taustakartan voi vaihtaa oikeasta yläkulmasta.")
-    tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu,
-                          kumottavia=len(tila["muokkaukset"]))
-    if tapahtuma and tapahtuma.get("tyyppi") == "kumoa":
-        if tila["muokkaukset"]:
-            tila["muokkaukset"].pop()
-        st.rerun()
-    if tapahtuma:
+    uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "uusi_viiva" and m["nimi"].startswith("Uusi"))
+    jono = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu,
+                     kumottavia=len(tila["muokkaukset"]), kuitatut=tila.setdefault("kuitatut", {}),
+                     uusi_nro=uusia + 1)
+    # Kartta näyttää yksinkertaiset muokkaukset heti itse; tässä ne lisätään istunnon muokkauksiin järjestyksessä
+    # (jonossa voi olla monta, jos niitä tehtiin nopeasti). Jokainen tehdään sen hetken viivaan.
+    uudet = slm.uudet_tapahtumat(jono, tila["kuitatut"])
+    for tapahtuma in uudet:
+        if tapahtuma.get("tyyppi") == "kumoa":
+            if tila["muokkaukset"]:
+                tila["muokkaukset"].pop()
+            continue
+        nyt = sl.sovella_muokkaukset(tila["pohja_tulos"], tila["muokkaukset"])
         try:
             uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "uusi_viiva" and m["nimi"].startswith("Uusi"))
             suorakulmioita = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "suorakulmio")
-            tila["muokkaukset"].append(slm.muokkaukseksi(tapahtuma, sl_tulos, kohteet, f"Uusi viiva {uusia + 1}",
-                                                         f"Suorakulmio {suorakulmioita + 1}",
-                                                         f"L{len(sl_tulos.get('lasketut_pisteet', [])) + 1}"))
+            tila["muokkaukset"].append(slm.muokkaukseksi(
+                tapahtuma, nyt, slm.napsahduspisteet(jx.pisteet_tallennettavaksi(pisteet), nyt),
+                f"Uusi viiva {uusia + 1}", f"Suorakulmio {suorakulmioita + 1}",
+                f"L{len(nyt.get('lasketut_pisteet', [])) + 1}"))
         except ValueError as e:
-            st.warning(f"Suorakulmiota ei tehty: {e}" if tapahtuma.get("tyyppi") == "suorakulmio" else str(e))
+            tila.setdefault("viestit", []).append(
+                f"Suorakulmiota ei tehty: {e}" if tapahtuma.get("tyyppi") == "suorakulmio" else str(e))
         except Exception as e:
-            st.error(f"Muokkausta ei voitu tehdä: {e}")
-        else:
-            st.rerun()
+            tila.setdefault("viestit", []).append(f"Muokkausta ei voitu tehdä: {e}")
+    if uudet:
+        _aja_osa_uudelleen()   # kartta saa kuittauksen ja Pythonin laskeman viivan
+    for viesti in tila.pop("viestit", []):
+        st.warning(viesti)
     napit = st.columns([1, 1, 3])
     if napit[0].button("Kumoa viimeisin", disabled=not tila["muokkaukset"], key="sl_kumoa"):
         tila["muokkaukset"].pop()
-        st.rerun()
+        _aja_osa_uudelleen()
     if napit[1].button("Palauta automaattinen viiva", disabled=not tila["muokkaukset"], key="sl_palauta"):
         tila["muokkaukset"].clear()
-        st.rerun()
+        st.rerun()   # koko sivu: automaattinen viiva lasketaan uudelleen valinnoilla
     if tila["muokkaukset"]:
         st.caption("Muokkaukset: " + "; ".join(slm.kuvaus(m) for m in tila["muokkaukset"]))
 
@@ -658,7 +688,7 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
             sarakkeet[2].write("")
             if sarakkeet[2].button("Jatka", key="sl_jatka"):
                 tila["muokkaukset"].append({"tyyppi": "jatka", "viiva": jv, "paa": paa})
-                st.rerun()
+                _aja_osa_uudelleen()
             sarakkeet = st.columns([2, 2, 1])
             y1 = sarakkeet[0].selectbox("Viiva 1", avoimet, key="sl_leikkaus_1")
             y2 = sarakkeet[1].selectbox("Viiva 2", avoimet, index=min(1, len(avoimet) - 1), key="sl_leikkaus_2")
@@ -666,7 +696,7 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
             if sarakkeet[2].button("Yhdistä", key="sl_leikkaus"):
                 tila["muokkaukset"].append({"tyyppi": "leikkaus", "viiva1": y1, "viiva2": y2, "paa1": None,
                                             "paa2": None})
-                st.rerun()
+                _aja_osa_uudelleen()
 
     with st.container(border=True):
         st.markdown("**Poista jana**")
@@ -687,7 +717,7 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
             sarakkeet[2].write("")
             if sarakkeet[2].button("Poista jana", key="sl_jana_poista", disabled=not janat):
                 tila["muokkaukset"].append({"tyyppi": "poista_jana", "viiva": jv, "jana": janat.index(jana)})
-                st.rerun()
+                _aja_osa_uudelleen()
 
     with st.container(border=True):
         st.markdown("**Suorakulmainen mittaus**")
@@ -725,7 +755,7 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
                     nimi = f"L{len(sl_tulos.get('lasketut_pisteet', [])) + 1}"
                     tila["muokkaukset"].append({"tyyppi": "piste", "nimi": nimi, "e": round(e, 3), "n": round(n, 3),
                                                 "a": a_nimi, "b": b_nimi, "a_mitta": a_mitta, "b_mitta": b_mitta})
-                    st.rerun()
+                    _aja_osa_uudelleen()
             else:
                 alku = sl.suorakulmainen_piste(A[:2], B[:2], 0.0, b_mitta)
                 loppu = sl.suorakulmainen_piste(A[:2], B[:2], ((B[0] - A[0]) ** 2 + (B[1] - A[1]) ** 2) ** 0.5, b_mitta)
@@ -737,7 +767,7 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
                         "pohja": valittu or next((v["nimi"] for v in sl_tulos["viivat"]), None),
                         "karjet": [{"e": round(x, 3), "n": round(y, 3), "z": None, "nimi": f"b{b_mitta:g}",
                                     "laji": "laskettu"} for x, y in (alku, loppu)]})
-                    st.rerun()
+                    _aja_osa_uudelleen()
         except ValueError as e:
             st.warning(str(e))
 
@@ -764,7 +794,7 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
                 tila["muokkaukset"].append(slm.suorakulmio(
                     [{"e": x[0], "n": x[1], "z": x[2], "nimi": x[3] or kulmat[i], "laji": x[5]} for i, x in enumerate(p)],
                     f"Suorakulmio {uusia + 1}", pohja))
-                st.rerun()
+                _aja_osa_uudelleen()
         except ValueError as e:
             st.warning(str(e))
 
@@ -863,6 +893,20 @@ def _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi):
     return sl_tulos, poikkeamat_lidar
 
 
+@st.fragment
+def _seinalinjan_tulokset_osa(s, kaikki_pisteet, job_nimi):
+    """_seinalinjan_tulokset fragmenttina: kartan muokkaus ajaa uudelleen vain tämän osan, ei koko sivua
+    (kokonaiskartta, raportti, automaattinen viiva), joten muokkaus näkyy heti myös hitaalla tabletilla.
+    Viiva lasketaan siksi joka kerta istunnon muokkauksista (s["tila"] on istunnon olio). Kokonaiskartta
+    ja tallennus saavat muokkaukset seuraavassa koko sivun ajossa (tallennusnappi ajaa sen)."""
+    try:
+        s = dict(s, tulos=sl.sovella_muokkaukset(s["tila"]["pohja_tulos"], s["tila"]["muokkaukset"]))
+        return _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi)
+    except Exception as sl_virhe:
+        st.error(f"Seinälinjan muodostus epäonnistui: {_virheteksti(sl_virhe)}")
+        return None
+
+
 def _seinalinja_osio(s, kaikki_pisteet, job_nimi):
     """Seinälinja-osio (_seinalinjan_valmistelu). Palauttaa tallennettavan (tulos, poikkeamat LiDARista)
     tai None, jos seinälinjaa ei saatu muodostettua (tai käsin ei ole piirretty viivoja)."""
@@ -872,7 +916,7 @@ def _seinalinja_osio(s, kaikki_pisteet, job_nimi):
                        "Viivan voi piirtää kartalla mitattujen pisteiden kautta: Uusi viiva, Suorakulmio "
                        "(kolmesta kulmasta) tai suorakulmainen mittaus kartan alla. Piirretty viiva menee "
                        "DXF:ään, PNG:hen ja kantaan kuten automaattinen.")
-            tulokset = _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi)
+            tulokset = _seinalinjan_tulokset_osa(s, kaikki_pisteet, job_nimi)
         return tulokset if s["tulos"]["viivat"] or s["tulos"].get("lasketut_pisteet") else None
     with st.expander("Seinälinja (koodit 8 / 5 / 100)", expanded=True):
         st.caption(
@@ -906,7 +950,7 @@ def _seinalinja_osio(s, kaikki_pisteet, job_nimi):
         try:
             if s["virhe"] is not None:
                 raise s["virhe"]
-            return _seinalinjan_tulokset(s, kaikki_pisteet, job_nimi)
+            return _seinalinjan_tulokset_osa(s, kaikki_pisteet, job_nimi)
         except Exception as sl_virhe:
             st.error(f"Seinälinjan muodostus epäonnistui: {_virheteksti(sl_virhe)}")
             return None

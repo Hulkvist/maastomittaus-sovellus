@@ -1,6 +1,6 @@
 """Pieni Streamlit-sovellus muokkauskartan selaintestiin (test_selain_muokkain.py): yksi avoin viiva ja
-pisteet, kartan tapahtumat näytetään JSON-listana. Viiva ei muutu tapahtumista, joten kohteet pysyvät
-paikallaan."""
+pisteet, kartan tapahtumat näytetään JSON-listana. Viiva ei muutu tapahtumista (kartan paikallinen esikatselu
+palaa ennalleen palvelimen vastauksessa), joten kohteet pysyvät paikallaan."""
 import json
 import os
 import sys
@@ -21,8 +21,10 @@ TULOS = {"viivat": [{"nimi": "Viiva 1", "suljettu": False,
 if __name__ == "__main__":         # streamlit run; testi tuo vain vakiot
     st.set_page_config(layout="wide")             # kuten app.py
     tapahtumat = st.session_state.setdefault("tapahtumat", [])
-    t = slm.nayta(TULOS, PISTEET, kumottavia=len(tapahtumat))
-    if t:
-        tapahtumat.append(t)
-        st.rerun()                                # kuten app.py: kartta saa uuden tilan (Kumoa-nappi)
+    kuitatut = st.session_state.setdefault("kuitatut", {})
+    jono = slm.nayta(TULOS, PISTEET, kumottavia=len(tapahtumat), kuitatut=kuitatut)
+    uudet = slm.uudet_tapahtumat(jono, kuitatut)
+    if uudet:
+        tapahtumat.extend(uudet)
+        st.rerun()                                # kuten app.py: kartta saa kuittauksen ja uuden tilan
     st.code(json.dumps(tapahtumat, ensure_ascii=False), language=None)
