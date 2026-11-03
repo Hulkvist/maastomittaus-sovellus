@@ -189,6 +189,33 @@ def test_uusi_viiva_valmis_napista(sivu):
     assert t["karjet"][1] == {"piste": 4} and "lat" in t["karjet"][2]
 
 
+def test_uusi_viiva_osoitin_nayttaa_napsahduksen(sivu):
+    """Piirrossa hiiren (tai leijuvan kynän) alla oleva napsahduskohde näkyy ennen napautusta: vihreä rengas,
+    kohteen nimi ja käsiosoitin, myös pelkässä pisteessä (P9 ei ole viivan kärki). Apuviiva edellisestä."""
+    kyna = Kyna(sivu)
+    nappi(sivu, kyna, "piirra")
+    x, y = kohta(sivu, 23, 4)
+    sivu.mouse.move(x + 8, y - 5)
+    sivu.wait_for_timeout(200)
+    vihje = sivu.locator(".slm-vihje")
+    assert vihje.is_visible() and vihje.inner_text() == "P9"
+    assert "slm-osuu" in sivu.locator(".slm-kartta").get_attribute("class")
+    assert sivu.evaluate("getComputedStyle(document.querySelector('.slm-kartta')).cursor") == "pointer"
+    x0, y0 = kohta(sivu, 10, 5)
+    sivu.mouse.move(x0, y0)                       # tyhjä kohta: ei renkaata
+    sivu.wait_for_timeout(200)
+    assert not vihje.is_visible()
+    assert "slm-osuu" not in sivu.locator(".slm-kartta").get_attribute("class")
+    sivu.mouse.click(x, y)                        # ensimmäinen kärki P9:ään
+    sivu.mouse.move(x0, y0)
+    sivu.wait_for_timeout(200)
+    apuviivoja = sivu.evaluate("""() => {
+        const t = document.querySelector('.slm-kartta').parentElement.__slm;
+        let n = 0; t.kartta.eachLayer((l) => { if (l.options && l.options.dashArray === "4 6") n++; });
+        return n; }""")
+    assert apuviivoja == 1
+
+
 def test_hiiren_pikatoiminnot_toimivat(sivu):
     x, y = kohta(sivu, 20, 10)
     sivu.mouse.click(x, y, button="right")

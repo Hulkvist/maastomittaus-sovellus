@@ -29,6 +29,7 @@ import seinalinja as sl
 LEAFLET = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist"
 NAPSAHDUS_PX = 12        # hiirellä kärki napsahtaa pisteeseen tätä lähempänä (näytön pikseleinä)
 NAPSAHDUS_KYNA_PX = 24   # kynällä ja sormella (kärki jää kynän alle, napautus osuu epätarkemmin)
+NIMIA_NAKYVISSA_MAX = 150  # pisteiden nimet näytetään, kun näkyvissä on enintään näin monta pistettä
 
 _CSS = """
 .slm-kartta { width: 100%; height: min(620px, calc(100vh - 220px)); min-height: 360px; border: 1px solid #ccc;
@@ -60,6 +61,8 @@ _CSS = """
 .slm-ab { background: #9467bd; color: #fff; border-radius: 50%; font: bold 13px sans-serif; text-align: center;
           line-height: 22px; box-shadow: 0 0 0 2px #fff; }
 .slm-piirtaa { cursor: crosshair !important; }
+.slm-kartta.slm-piirtaa.slm-osuu { cursor: pointer !important; }
+.slm-kartta.slm-ei-nimia .slm-nimi { display: none; }
 .slm-kulma { background: #ff7f0e; color: #fff; border-radius: 50%; font: bold 14px sans-serif;
              text-align: center; line-height: 22px; box-shadow: 0 0 0 2px #fff; }
 .slm-vihje { position: absolute; z-index: 1000; pointer-events: none; background: #2ca02c; color: #fff;
@@ -74,6 +77,7 @@ const LEAFLET = "%(leaflet)s";
 const NAPSAHDUS_PX = %(napsahdus)d;
 const NAPSAHDUS_KYNA_PX = %(napsahdus_kyna)d;
 const LASKETTU_KOODI = "%(laskettu)s";
+const NIMIA_NAKYVISSA_MAX = %(nimia_max)d;
 
 async function lataaLeaflet() {
   if (!document.getElementById("slm-leaflet-css")) {
@@ -146,6 +150,42 @@ function luoTyokalut(L, tila) {
   const ohje = (teksti) => { div.querySelector(".slm-ohje").textContent = teksti; };
   const laheta = (m) => tila.setTriggerValue("muokkaus", m);
 
+  // Osoitin (hiiri, leijuva kynä): napsahduskohde vihreällä renkaalla ja nimellä jo ennen napautusta, ja
+  // osoitin muuttuu kädeksi. Piirrossa apuviiva edellisestä kärjestä.
+  const osoitin = L.layerGroup().addTo(kartta);
+  const NAPSAHTAVAT = new Set(["piirra", "suorakulmio", "mittaa", "sivumitta", "lisaa"]);
+  function piilotaOsoitin() {
+    osoitin.clearLayers();
+    tila.vihje.style.display = "none";
+    kartta.getContainer().classList.remove("slm-osuu");
+  }
+  tila.piilotaOsoitin = piilotaOsoitin;
+  function naytaOsoitin(ll) {
+    piilotaOsoitin();
+    const t = tila.tyokalu, h = tila.haku;
+    if (!h || !NAPSAHTAVAT.has(t)) return;
+    const k = t === "lisaa" && !h.lahinJana(ll) ? null : h.lahin(ll);
+    if (t === "piirra" && tila.piirto.length) {
+      L.polyline([tila.piirto[tila.piirto.length - 1].ll, k ? k.ll : ll],
+                 { color: "#d62728", weight: 2, dashArray: "4 6", interactive: false }).addTo(osoitin);
+    }
+    if (!k) return;
+    L.circleMarker(k.ll, { radius: 11, color: "#2ca02c", weight: 3, fill: false, interactive: false }).addTo(osoitin);
+    const p = kartta.latLngToContainerPoint(k.ll);
+    Object.assign(tila.vihje.style, { display: "block", left: `${p.x}px`, top: `${p.y - 16}px` });
+    tila.vihje.textContent = k.nimi;
+    kartta.getContainer().classList.add("slm-osuu");
+  }
+  let leijuu = null;   // yksi päivitys ruudunpäivitystä kohden
+  kartta.getContainer().addEventListener("pointermove", (e) => {
+    if (e.buttons) return;          // raahaus tai panorointi
+    if (e.pointerType !== "touch") tila.kyna = e.pointerType !== "mouse";
+    const ll = kartta.mouseEventToLatLng(e);
+    if (!leijuu) leijuu = requestAnimationFrame(() => { leijuu = null; naytaOsoitin(ll); });
+  });
+  kartta.getContainer().addEventListener("pointerleave", piilotaOsoitin);
+  kartta.on("movestart zoomstart", piilotaOsoitin);
+
   function aseta(t) {
     tila.tyokalu = t;
     tila.piirto = [];
@@ -156,6 +196,7 @@ function luoTyokalut(L, tila) {
     tila.sivu = [];
     div.querySelector(".slm-sivu").style.display = "none";
     taso.clearLayers();
+    piilotaOsoitin();
     for (const b of div.querySelectorAll("[data-t]")) b.classList.toggle("paalla", b.dataset.t === t);
     nappi("valmis").style.display = t === "piirra" ? "" : "none";
     nappi("vahvista").style.display = "none";
@@ -406,10 +447,23 @@ export default async function (component) {
     // Piilotettu välilehti tai suljettu osio muuttaa säiliön kokoa, jota Leaflet ei huomaa itse
     new ResizeObserver(() => kartta.invalidateSize()).observe(div);
     const ryhma = L.layerGroup().addTo(kartta);
+    // Pisteet omalla tasollaan canvasille: piirretään uudelleen vain, kun ne muuttuvat (ei joka muokkauksella)
+    const pistetaso = L.layerGroup().addTo(kartta);
     const vihje = document.createElement("div");
     vihje.className = "slm-vihje";
     kartta.getContainer().appendChild(vihje);
-    tila = parentElement.__slm = { kartta, ryhma, vihje, rajattu: null, kyna: false };
+    // Canvas omassa ruudussaan viivojen alla, eikä se ota osoitinta (viivojen klikkaus menee läpi)
+    const ruutu = kartta.createPane("slmPisteet");
+    Object.assign(ruutu.style, { zIndex: 350, pointerEvents: "none" });
+    tila = parentElement.__slm = { kartta, ryhma, pistetaso, vihje, rajattu: null, kyna: false,
+                                   piirtaja: L.canvas({ padding: 0.5, pane: "slmPisteet" }) };
+    // Nimet vain, kun pisteitä on näkyvissä kohtuullisesti (satojen nimien siirtely hidastaa tablettia)
+    tila.nimet = () => {
+      const alue = kartta.getBounds();
+      const n = (tila.pisteet || []).filter((p) => alue.contains([p[0], p[1]])).length;
+      div.classList.toggle("slm-ei-nimia", n > NIMIA_NAKYVISSA_MAX);
+    };
+    kartta.on("moveend zoomend", tila.nimet);
     // Viimeisin syötetapa: kynällä ja sormella isompi napsahdussäde, eikä tuplaklikkaus tai pitkä painallus
     // (Windows tekee siitä oikean klikkauksen) tee hiiren pikatoimintoja
     div.addEventListener("pointerdown", (e) => { tila.kyna = e.pointerType !== "mouse"; }, true);
@@ -417,6 +471,7 @@ export default async function (component) {
   }
   const { kartta, ryhma } = tila;
   ryhma.clearLayers();
+  tila.piilotaOsoitin();
   tila.setTriggerValue = setTriggerValue;
   const laheta = (m) => setTriggerValue("muokkaus", m);
 
@@ -484,13 +539,19 @@ export default async function (component) {
   tila.haku = { lahin, sijainti, kohteenSijainti, lahinJana, lahinKarki, piirtokohta, sade };
 
   // Pisteet eivät ota napautuksia itse: kartan napautus etsii lähimmän (isompi osuma-alue)
-  pisteet.forEach((p) => {
-    const laskettu = p[3] === LASKETTU_KOODI;   // suorakulmaisella mittauksella laskettu piste
-    L.circleMarker([p[0], p[1]], { radius: laskettu ? 5 : 4, color: laskettu ? "#d62728" : "#1f77b4", weight: 1,
-                                   fillOpacity: 0.9, interactive: false })
-      .bindTooltip(String(p[2]), { permanent: true, direction: "right", className: "slm-nimi", offset: [4, 0] })
-      .addTo(ryhma);
-  });
+  const pisteavain = JSON.stringify(pisteet);
+  if (tila.pisteavain !== pisteavain) {
+    tila.pistetaso.clearLayers();
+    pisteet.forEach((p) => {
+      const laskettu = p[3] === LASKETTU_KOODI;   // suorakulmaisella mittauksella laskettu piste
+      L.circleMarker([p[0], p[1]], { radius: laskettu ? 5 : 4, color: laskettu ? "#d62728" : "#1f77b4", weight: 1,
+                                     fillOpacity: 0.9, interactive: false, renderer: tila.piirtaja })
+        .bindTooltip(String(p[2]), { permanent: true, direction: "right", className: "slm-nimi", offset: [4, 0] })
+        .addTo(tila.pistetaso);
+    });
+    tila.pisteavain = pisteavain;
+    tila.pisteet = pisteet;
+  }
 
   const kaikki = [];
   tila.merkit = [];
@@ -567,10 +628,11 @@ export default async function (component) {
     kartta.fitBounds(L.latLngBounds(alue).pad(0.15));
     tila.rajattu = rajaus;
   }
+  tila.nimet();
   setTimeout(() => kartta.invalidateSize(), 0);
 }
 """ % {"leaflet": LEAFLET, "napsahdus": NAPSAHDUS_PX, "napsahdus_kyna": NAPSAHDUS_KYNA_PX,
-       "laskettu": sl.LASKETTU_KOODI}
+       "laskettu": sl.LASKETTU_KOODI, "nimia_max": NIMIA_NAKYVISSA_MAX}
 
 _KOMPONENTIT = {}
 
