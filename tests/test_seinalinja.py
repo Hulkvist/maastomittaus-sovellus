@@ -1082,3 +1082,17 @@ def test_nakyvyys_hipaisu_ja_tapa():
     del pisteet[3]["asema"]
     tulos = sl.muodosta_seinalinjat(pisteet)
     assert sl.nakolinjat_seinan_lapi(tulos["viivat"][0], tulos["pisteet"]) == []
+
+
+def test_viistetyt_nurkat_kahdella_pisteella_seinaa_kohden():
+    """Viistetyt nurkat (45°) ja jokaiselta seinältä kaksi 100-pistettä (poro.jxl, RAK Eriste 13-22): piilokulmat
+    seinäparien leikkauksiin (13-14, 15-16, 17-18, 19-20, 21-22), eikä kolmen pisteen 'seiniä' vinoilla
+    kulmilla, vaikka pisteet mahtuisivat linjatoleranssiin."""
+    xy = [(59.655, 34.008), (54.256, 33.823), (53.064, 33.908), (52.147, 34.752), (51.94, 35.086),
+          (51.56, 41.373), (51.753, 41.729), (52.647, 42.616), (53.161, 42.749), (59.458, 43.164)]
+    pisteet = ([piste("a", "8", 62.0, 31.0)] + [piste(str(i), "5" if i in (0, 9) else "100", x, y)
+                                                 for i, (x, y) in enumerate(xy)] + [piste("b", "8", 61.2, 45.2)])
+    tulos = sl.muodosta_seinalinjat(pisteet)
+    [viiva] = tulos["viivat"]
+    lasketut = [(round(k["e"] - E0, 2), round(k["n"] - N0, 2)) for k in viiva["karjet"] if k["laji"] == "laskettu"]
+    assert lasketut == [(53.2, 33.79), (51.95, 34.93), (51.55, 41.53), (52.75, 42.72)]
