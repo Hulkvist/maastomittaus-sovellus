@@ -142,13 +142,13 @@ function luoTyokalut(L, tila) {
   div.querySelector('[data-a="valmis"]').onclick = () => valmis();
   div.querySelector('[data-a="vahvista"]').onclick = () => { if (tila.valittu) poista(tila.valittu); };
   div.querySelector('[data-a="peruuta"]').onclick = () => aseta("siirra");
-  div.querySelector('[data-a="kumoa"]').onclick = () => tila.setTriggerValue("muokkaus", { tyyppi: "kumoa" });
+  div.querySelector('[data-a="kumoa"]').onclick = () => tila.laheta({ tyyppi: "kumoa" });
   div.querySelector('[data-a="lisaapiste"]').onclick = () => lisaaSivupiste();
   for (const i of div.querySelectorAll(".slm-sivu input")) i.oninput = () => piirraSivu();
   kartta.getContainer().before(div);
   const nappi = (a) => div.querySelector(`[data-a="${a}"]`);
   const ohje = (teksti) => { div.querySelector(".slm-ohje").textContent = teksti; };
-  const laheta = (m) => tila.setTriggerValue("muokkaus", m);
+  const laheta = (m) => tila.laheta(m);
 
   // Osoitin (hiiri, leijuva kynä): napsahduskohde vihreällä renkaalla ja nimellä jo ennen napautusta, ja
   // osoitin muuttuu kädeksi. Piirrossa apuviiva edellisestä kärjestä.
@@ -420,6 +420,94 @@ function luoTyokalut(L, tila) {
   aseta("siirra");
 }
 
+// Viivan piirtopisteet: kärjet ja kaarien välipisteet (karki[6] = kaaren pisteet kärjestä seuraavaan)
+function piirto(v) {
+  const kk = v.karjet, ulos = [];
+  kk.forEach((k, j) => {
+    ulos.push([k[0], k[1]]);
+    if (v.suljettu || j < kk.length - 1) for (const q of k[6] || []) ulos.push(q);
+  });
+  if (v.suljettu && kk.length) ulos.push([kk[0][0], kk[0][1]]);
+  return ulos;
+}
+
+// Yksinkertaiset muokkaukset näytetään heti selaimessa (sama logiikka kuin seinalinja.sovella_muokkaukset),
+// ja palvelimen vastaus korvaa esikatselun. Muut (jatka, yhdistä, suorakulmio, sivumitta, kumoa) odottavat
+// palvelinta. Palauttaa true, jos muokkaus näytettiin.
+const PAIKALLISET = new Set(["siirra", "lisaa", "poista", "poista_jana", "uusi_viiva"]);
+function karjeksi(d, s) {
+  if (s.piste !== undefined) {
+    const p = d.pisteet[s.piste];
+    return p && [p[0], p[1], p[2], p[3] === LASKETTU_KOODI ? "laskettu" : "mitattu", p[4], p[5], []];
+  }
+  if (s.kohde_viiva !== undefined) {
+    const v = d.viivat.find((x) => x.nimi === s.kohde_viiva), k = v && v.karjet[s.kohde_karki];
+    return k && [k[0], k[1], k[2], k[3], k[4], k[5], []];
+  }
+  return [s.lat, s.lon, "", null, null, null, []];
+}
+function paikallisesti(d, m, uusiNimi) {
+  if (m.tyyppi === "uusi_viiva") {
+    const karjet = m.karjet.map((s) => karjeksi(d, s));
+    if (karjet.some((k) => !k)) return false;
+    for (const k of karjet) { k[3] = k[3] || (k[2] ? "mitattu" : "käsin"); k[2] = k[2] || k[3]; }
+    d.viivat.push({ nimi: uusiNimi, suljettu: !!m.suljettu && karjet.length >= 3, karjet });
+    return true;
+  }
+  const v = d.viivat.find((x) => x.nimi === m.viiva);
+  if (!v) return false;
+  const kk = v.karjet, n = kk.length;
+  if (m.tyyppi === "siirra") {
+    const k = karjeksi(d, m), vanha = kk[m.karki];
+    if (!k || !vanha) return false;
+    kk[m.karki] = [k[0], k[1], k[2] || vanha[2], k[3] || (k[2] ? "mitattu" : "käsin"), k[4], k[5], []];
+    if (m.karki > 0 || v.suljettu) kk[(m.karki - 1 + n) %% n][6] = [];   // kaari suoraksi, kunnes palvelin vastaa
+    return true;
+  }
+  if (m.tyyppi === "lisaa") {
+    const k = karjeksi(d, m);
+    if (!k || m.jalkeen < -1 || m.jalkeen >= n) return false;
+    if (m.jalkeen >= 0) kk[m.jalkeen][6] = [];
+    k[3] = k[3] || (k[2] ? "mitattu" : "käsin");
+    k[2] = k[2] || k[3];   // nimetön kärki saa lajinsa nimeksi (kuten Pythonissa)
+    kk.splice(m.jalkeen + 1, 0, k);
+    return true;
+  }
+  if (m.tyyppi === "poista") {
+    if (n <= 2 || !kk[m.karki]) return false;
+    if (m.karki > 0) kk[m.karki - 1][6] = [];
+    kk.splice(m.karki, 1);
+    return true;
+  }
+  if (m.tyyppi === "poista_jana") {
+    const i = m.jana;
+    if (i < 0 || i >= (v.suljettu ? n : n - 1)) return false;
+    kk[i][6] = [];
+    if (v.suljettu) { v.karjet = kk.slice(i + 1).concat(kk.slice(0, i + 1)); v.suljettu = false; return true; }
+    const [a, b] = [kk.slice(0, i + 1), kk.slice(i + 1)];
+    if (a.length >= 2) v.karjet = a; else d.viivat.splice(d.viivat.indexOf(v), 1);
+    if (b.length >= 2) {
+      let nro = 2, nimi = `${v.nimi} (osa 2)`;
+      while (d.viivat.some((x) => x.nimi === nimi)) nimi = `${v.nimi} (osa ${++nro})`;
+      d.viivat.push({ ...v, nimi, karjet: b, suljettu: false });
+    }
+    return true;
+  }
+  return false;
+}
+
+// Näytettävä tila: palvelimen viimeisin data ja sen päälle vielä kuittaamattomat paikalliset muokkaukset
+function naytettava(tila) {
+  const d = JSON.parse(JSON.stringify(tila.palvelin));
+  let uusia = 0;
+  for (const e of tila.jono) {
+    if (PAIKALLISET.has(e.m.tyyppi)
+        && paikallisesti(d, e.m, `Uusi viiva ${d.uusi_nro + uusia}`) && e.m.tyyppi === "uusi_viiva") uusia++;
+  }
+  d.kumottavia += tila.jono.filter((e) => e.m.tyyppi !== "kumoa").length;
+  return d;
+}
+
 export default async function (component) {
   const { data, parentElement, setTriggerValue } = component;
   const L = await lataaLeaflet();
@@ -456,7 +544,19 @@ export default async function (component) {
     const ruutu = kartta.createPane("slmPisteet");
     Object.assign(ruutu.style, { zIndex: 350, pointerEvents: "none" });
     tila = parentElement.__slm = { kartta, ryhma, pistetaso, vihje, rajattu: null, kyna: false,
-                                   piirtaja: L.canvas({ padding: 0.5, pane: "slmPisteet" }) };
+                                   piirtaja: L.canvas({ padding: 0.5, pane: "slmPisteet" }),
+                                   istunto: Math.random().toString(36).slice(2), nro: 0, jono: [] };
+    // Muokkaus: näytetään heti (jos yksinkertainen) ja lähetetään Pythonille numeroituna jonona. Jono lähtee
+    // kokonaan joka kerta, kunnes palvelin kuittaa sen (data.kuitatut), joten nopeissakaan muokkauksissa mikään
+    // ei katoa, vaikka Streamlit keskeyttäisi kesken jääneen ajon; Python käsittelee kunkin kerran.
+    tila.laheta = (m) => {
+      tila.jono.push({ n: ++tila.nro, m });
+      tila.lahetaJono();
+      if (PAIKALLISET.has(m.tyyppi)) tila.piirra(naytettava(tila));
+    };
+    tila.paikallisesti = paikallisesti;   // selaintesti vertaa Pythonin sovella_muokkaukset-tulokseen
+    tila.lahetaJono = () => tila.setTriggerValue("muokkaus", {
+      istunto: tila.istunto, jono: tila.jono.map((e) => ({ n: e.n, ...e.m })) });
     // Nimet vain, kun pisteitä on näkyvissä kohtuullisesti (satojen nimien siirtely hidastaa tablettia)
     tila.nimet = () => {
       const alue = kartta.getBounds();
@@ -469,11 +569,25 @@ export default async function (component) {
     div.addEventListener("pointerdown", (e) => { tila.kyna = e.pointerType !== "mouse"; }, true);
     luoTyokalut(L, tila);
   }
+  tila.setTriggerValue = setTriggerValue;
+  tila.palvelin = data;
+  const kuitattu = (data.kuitatut || {})[tila.istunto] || 0;
+  const odotti = tila.jono.length;
+  tila.jono = tila.jono.filter((e) => e.n > kuitattu);
+  tila.piirra = (d) => piirraKartta(L, tila, d);
+  tila.piirra(naytettava(tila));
+  // Vastaus ei kuitannut mitään (esim. muokkaus tuli kesken ajon): jono kerran uudelleen
+  if (tila.jono.length && tila.jono.length === odotti && tila.uudelleen !== tila.nro) {
+    tila.uudelleen = tila.nro;
+    tila.lahetaJono();
+  }
+}
+
+function piirraKartta(L, tila, data) {
   const { kartta, ryhma } = tila;
   ryhma.clearLayers();
   tila.piilotaOsoitin();
-  tila.setTriggerValue = setTriggerValue;
-  const laheta = (m) => setTriggerValue("muokkaus", m);
+  const laheta = (m) => tila.laheta(m);
 
   const pisteet = data.pisteet;   // [lat, lon, nimi, koodi]
   const muokattavat = data.viivat.filter((v) => !data.valittu || data.valittu === v.nimi);
@@ -557,9 +671,10 @@ export default async function (component) {
   tila.merkit = [];
   for (const v of data.viivat) {
     const muokattava = muokattavat.includes(v);
-    const viiva = L.polyline(v.piirto, { color: muokattava ? "#000" : "#888", weight: muokattava ? 3 : 2 })
+    const viivan_pisteet = piirto(v);
+    const viiva = L.polyline(viivan_pisteet, { color: muokattava ? "#000" : "#888", weight: muokattava ? 3 : 2 })
       .bindTooltip(v.nimi).addTo(ryhma);
-    v.piirto.forEach((q) => kaikki.push(q));
+    viivan_pisteet.forEach((q) => kaikki.push(q));
     if (!muokattava) continue;
     // Hiirellä viivan klikkaus = uusi kärki ja oikea klikkaus = jana pois (kuten ennen); muuten työkalu
     viiva.on("click", (e) => {
@@ -674,23 +789,57 @@ def _taustat(api_key, helsinki):
     return taustat
 
 
-def nayta(tulos, kohteet, api_key=None, helsinki=False, valittu=None, kumottavia=0, key="seinalinjan_muokkain"):
+def _kaaren_valipisteet(viiva, j, latlon):
+    """Kärjestä j seuraavaan kärkeen kulkevan kaaren välipisteet (lat, lon), suoralle janalle []."""
+    karjet = viiva["karjet"]
+    if abs(karjet[j].get("bulge") or 0.0) <= 1e-12 or (j == len(karjet) - 1 and not viiva["suljettu"]):
+        return []
+    a, b = karjet[j], karjet[(j + 1) % len(karjet)]
+    return [list(latlon(e, n)) for e, n in sl._kaaren_pisteet((a["e"], a["n"]), (b["e"], b["n"]), a["bulge"])[1:-1]]
+
+
+def nayta(tulos, kohteet, api_key=None, helsinki=False, valittu=None, kumottavia=0, kuitatut=None, uusi_nro=1,
+          key="seinalinjan_muokkain"):
     """Muokkauskartta. tulos = (muokattu) seinälinja, kohteet = napsahduspisteet(), kumottavia = muokkausten
-    määrä (Kumoa-nappi). Palauttaa muokkaustapahtuman (dict) tai None."""
+    määrä (Kumoa-nappi), kuitatut = uudet_tapahtumat()-kirjanpito, uusi_nro = seuraavan piirretyn viivan
+    numero ("Uusi viiva N", sama kuin Pythonin antama nimi). Palauttaa kartan muokkausjonon
+    (uudet_tapahtumat()) tai None."""
+    data = kartan_data(tulos, kohteet, api_key, helsinki, valittu, kumottavia, kuitatut, uusi_nro)
+    tulos_k = _komponentti()(key=key, data=data, height="content", on_muokkaus_change=lambda: None)
+    return tulos_k.get("muokkaus") if tulos_k else None
+
+
+def kartan_data(tulos, kohteet, api_key=None, helsinki=False, valittu=None, kumottavia=0, kuitatut=None, uusi_nro=1):
+    """Kartalle lähtevä data (ks. nayta): kärjet [lat, lon, nimi, laji, e, n, kaaren välipisteet], pisteet
+    [lat, lon, nimi, koodi, e, n]."""
     latlon = hk._latlon_muunnin()
-    data = {
+    return {
         "viivat": [{"nimi": v["nimi"], "suljettu": v["suljettu"],
-                    "karjet": [[*latlon(k["e"], k["n"]), str(k.get("nimi") or ""), k.get("laji"), k["e"], k["n"]]
-                               for k in v["karjet"]],
-                    "piirto": [list(latlon(e, n)) for e, n in sl.viivan_pisteet(v)]}
+                    "karjet": [[*latlon(k["e"], k["n"]), str(k.get("nimi") or ""), k.get("laji"), k["e"], k["n"],
+                                _kaaren_valipisteet(v, j, latlon)]
+                               for j, k in enumerate(v["karjet"])]}
                    for v in tulos["viivat"]],
         "pisteet": [[*latlon(e, n), str(nimi), str(koodi or ""), e, n] for nimi, koodi, e, n, _ in kohteet],
         "valittu": valittu,
         "kumottavia": kumottavia,
+        "kuitatut": kuitatut or {},
+        "uusi_nro": uusi_nro,
         "taustat": _taustat(api_key, helsinki),
     }
-    tulos_k = _komponentti()(key=key, data=data, height="content", on_muokkaus_change=lambda: None)
-    return tulos_k.get("muokkaus") if tulos_k else None
+
+
+def uudet_tapahtumat(jono, kuitatut):
+    """Kartan muokkausjonosta ({"istunto", "jono": [{"n", "tyyppi", ...}]}) vielä käsittelemättömät tapahtumat
+    järjestyksessä. Kartta lähettää jonon kokonaan, kunnes kuittaus (kuitatut = {istunto: viimeisin n},
+    päivitetään tässä) palaa nayta(kuitatut=...)-datassa, joten sama tapahtuma voi tulla monesti: kukin
+    palautetaan kerran."""
+    if not jono:
+        return []
+    istunto = str(jono.get("istunto"))
+    viimeisin = kuitatut.get(istunto, 0)
+    uudet = [{k: v for k, v in t.items() if k != "n"} for t in jono.get("jono", []) if t["n"] > viimeisin]
+    kuitatut[istunto] = max([viimeisin] + [t["n"] for t in jono.get("jono", [])])
+    return uudet
 
 
 def _3879(lat, lon):

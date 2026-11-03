@@ -634,25 +634,35 @@ def _seinalinjan_muokkaus(sl_tulos, tila, pisteet, valittu, helsinki):
                "viivan klikkaus = uusi kärki, oikea klikkaus = poista, tuplaklikkaus = suorakulmion kulma, Esc = "
                "peruuta. Punainen kärki = laskettu kulma, oranssi = käsin siirretty, punainen piste = "
                "suorakulmaisella mittauksella laskettu piste. Taustakartan voi vaihtaa oikeasta yläkulmasta.")
-    tapahtuma = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu,
-                          kumottavia=len(tila["muokkaukset"]))
-    if tapahtuma and tapahtuma.get("tyyppi") == "kumoa":
-        if tila["muokkaukset"]:
-            tila["muokkaukset"].pop()
-        _aja_osa_uudelleen()
-    if tapahtuma:
+    uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "uusi_viiva" and m["nimi"].startswith("Uusi"))
+    jono = slm.nayta(sl_tulos, kohteet, api_key=hk.MML_API_KEY, helsinki=helsinki, valittu=valittu,
+                     kumottavia=len(tila["muokkaukset"]), kuitatut=tila.setdefault("kuitatut", {}),
+                     uusi_nro=uusia + 1)
+    # Kartta näyttää yksinkertaiset muokkaukset heti itse; tässä ne lisätään istunnon muokkauksiin järjestyksessä
+    # (jonossa voi olla monta, jos niitä tehtiin nopeasti). Jokainen tehdään sen hetken viivaan.
+    uudet = slm.uudet_tapahtumat(jono, tila["kuitatut"])
+    for tapahtuma in uudet:
+        if tapahtuma.get("tyyppi") == "kumoa":
+            if tila["muokkaukset"]:
+                tila["muokkaukset"].pop()
+            continue
+        nyt = sl.sovella_muokkaukset(tila["pohja_tulos"], tila["muokkaukset"])
         try:
             uusia = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "uusi_viiva" and m["nimi"].startswith("Uusi"))
             suorakulmioita = sum(1 for m in tila["muokkaukset"] if m["tyyppi"] == "suorakulmio")
-            tila["muokkaukset"].append(slm.muokkaukseksi(tapahtuma, sl_tulos, kohteet, f"Uusi viiva {uusia + 1}",
-                                                         f"Suorakulmio {suorakulmioita + 1}",
-                                                         f"L{len(sl_tulos.get('lasketut_pisteet', [])) + 1}"))
+            tila["muokkaukset"].append(slm.muokkaukseksi(
+                tapahtuma, nyt, slm.napsahduspisteet(jx.pisteet_tallennettavaksi(pisteet), nyt),
+                f"Uusi viiva {uusia + 1}", f"Suorakulmio {suorakulmioita + 1}",
+                f"L{len(nyt.get('lasketut_pisteet', [])) + 1}"))
         except ValueError as e:
-            st.warning(f"Suorakulmiota ei tehty: {e}" if tapahtuma.get("tyyppi") == "suorakulmio" else str(e))
+            tila.setdefault("viestit", []).append(
+                f"Suorakulmiota ei tehty: {e}" if tapahtuma.get("tyyppi") == "suorakulmio" else str(e))
         except Exception as e:
-            st.error(f"Muokkausta ei voitu tehdä: {e}")
-        else:
-            _aja_osa_uudelleen()
+            tila.setdefault("viestit", []).append(f"Muokkausta ei voitu tehdä: {e}")
+    if uudet:
+        _aja_osa_uudelleen()   # kartta saa kuittauksen ja Pythonin laskeman viivan
+    for viesti in tila.pop("viestit", []):
+        st.warning(viesti)
     napit = st.columns([1, 1, 3])
     if napit[0].button("Kumoa viimeisin", disabled=not tila["muokkaukset"], key="sl_kumoa"):
         tila["muokkaukset"].pop()
